@@ -1,0 +1,9 @@
+# Build and test output
+/jmapsync
+/coverage.out
+/.cache/
+
+# Local credentials and synchronization state
+/config.json
+/*.token.json
+/*.state.json
