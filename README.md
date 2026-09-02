@@ -33,9 +33,10 @@ On the first run, the tool may adopt existing Gmail mail by RFC Message-ID. It
 adopts one clear match and adds the managed label. Gmail messages cannot
 gain new headers after insertion, so adopted mail keeps its original headers.
 
-The tool checks all adoption candidates before it changes Gmail. A missing
-candidate ID, shared source ID, duplicate match, or conflicting identity stops
-the run with repair guidance.
+During a rebuild, the tool checks all adoption candidates before it changes
+Gmail. It stops if a marked legacy message lacks a usable Message-ID. Shared
+source Message-IDs, duplicate Gmail matches, and conflicting identities also
+stop the run with repair guidance.
 
 ## Setup
 

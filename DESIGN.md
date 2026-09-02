@@ -71,8 +71,8 @@ labels.
 
 ## Run flow
 
-1. Bind the authenticated Fastmail and Gmail identities.
-2. Load the cache, or prepare a full rebuild.
+1. Load the cache, or prepare a full rebuild.
+2. Bind the authenticated Fastmail and Gmail identities.
 3. Read Fastmail mailboxes and derive Gmail labels.
 4. If rebuilding, validate all marked mail and adoption candidates.
 5. Create or rename labels, then reconcile Fastmail mail.
