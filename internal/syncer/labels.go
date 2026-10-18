@@ -18,17 +18,15 @@ const (
 )
 
 // MailboxLabelNames maps stable Fastmail mailbox IDs to Gmail label names.
-// A blank name means the JMAP mailbox is virtual (for example, All Mail) and
-// does not need a Gmail label.
-func MailboxLabelNames(mailboxes []Mailbox, trashName, spamName string) (map[string]string, error) {
-	return MailboxLabelNamesWithRoles(mailboxes, trashName, spamName, nil)
-}
-
-// MailboxLabelNamesWithRoles applies optional Gmail label-name overrides keyed
-// by lower-case JMAP mailbox role (for example, "sent" or "drafts").
-func MailboxLabelNamesWithRoles(mailboxes []Mailbox, trashName, spamName string, roleLabels map[string]string) (map[string]string, error) {
-	trashName = effectiveRoleLabel("trash", trashName, roleLabels)
-	spamName = effectiveRoleLabel("junk", spamName, roleLabels)
+// Overrides are keyed by lower-case JMAP role. Omitted trash and junk roles
+// use ordinary Gmail labels Fastmail_Trash and Fastmail_Spam. A blank name
+// means the JMAP mailbox is virtual (for example, All Mail) and needs no label.
+func MailboxLabelNames(mailboxes []Mailbox, roleLabels map[string]string) (map[string]string, error) {
+	trashName := effectiveRoleLabel("trash", "Fastmail_Trash", roleLabels)
+	spamName := effectiveRoleLabel("junk", "Fastmail_Spam", roleLabels)
+	if trashName == "" || spamName == "" {
+		return nil, fmt.Errorf("Fastmail Trash and Spam must map to nonempty Gmail user labels")
+	}
 	if isSystemLabelName(trashName) || isSystemLabelName(spamName) {
 		return nil, fmt.Errorf("Fastmail Trash and Spam must map to Gmail user labels")
 	}
@@ -127,7 +125,8 @@ func effectiveRoleLabel(role, fallback string, roleLabels map[string]string) str
 
 func isSystemLabelName(name string) bool {
 	switch strings.ToUpper(strings.TrimSpace(name)) {
-	case LabelInbox, LabelSent, LabelDraft, LabelImportant, LabelStarred, LabelUnread, LabelSpam, LabelTrash:
+	case LabelInbox, LabelSent, LabelDraft, LabelImportant, LabelStarred, LabelUnread, LabelSpam, LabelTrash,
+		"CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS":
 		return true
 	default:
 		return false

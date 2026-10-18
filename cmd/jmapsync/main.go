@@ -159,7 +159,6 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		Store: stateStore,
 		Options: syncer.Options{
 			Apply: apply, Delete: settings.Delete, Full: *full,
-			TrashLabel: settings.TrashLabel, SpamLabel: settings.SpamLabel,
 			RoleLabels: settings.RoleLabels, Output: stdout,
 			IncludeMailboxes: settings.Fastmail.IncludeMailboxes,
 		},

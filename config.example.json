@@ -12,7 +12,10 @@
   },
   "state_file": "~/.local/state/jmapsync/state.json",
   "delete": true,
-  "trash_label": "Fastmail_Trash",
-  "spam_label": "Fastmail_Spam"
+  "role_labels": {
+    "archive": "Fastmail_Archive",
+    "trash": "Fastmail_Trash",
+    "junk": "Fastmail_Spam"
+  }
 }
 

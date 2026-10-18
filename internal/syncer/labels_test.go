@@ -16,7 +16,7 @@ func TestMailboxAndKeywordMapping(t *testing.T) {
 		{ID: "alpha", Name: "Alpha", ParentID: "projects"},
 		{ID: "all", Name: "All Mail", Role: "all"},
 	}
-	names, err := MailboxLabelNames(mailboxes, "Fastmail_Trash", "Fastmail_Spam")
+	names, err := MailboxLabelNames(mailboxes, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestMailboxHierarchyCycleFails(t *testing.T) {
 	_, err := MailboxLabelNames([]Mailbox{
 		{ID: "a", Name: "A", ParentID: "b"},
 		{ID: "b", Name: "B", ParentID: "a"},
-	}, "Fastmail_Trash", "Fastmail_Spam")
+	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("error = %v, want hierarchy cycle", err)
 	}
@@ -75,7 +75,7 @@ func TestFastmailTrashAndSpamRequireDistinctUserLabels(t *testing.T) {
 		{name: "same label", trash: "Fastmail", spam: "fastmail"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := MailboxLabelNames(mailboxes, test.trash, test.spam); err == nil {
+			if _, err := MailboxLabelNames(mailboxes, map[string]string{"trash": test.trash, "junk": test.spam}); err == nil {
 				t.Fatal("expected invalid special-mailbox labels to fail")
 			}
 		})
@@ -100,7 +100,7 @@ func TestMailboxMappingRejectsNativeSpamFromAnyMailbox(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := MailboxLabelNamesWithRoles(test.mailboxes, "Fastmail_Trash", "Fastmail_Spam", test.roleLabels)
+			_, err := MailboxLabelNames(test.mailboxes, test.roleLabels)
 			if err == nil || !strings.Contains(err.Error(), "native Spam") {
 				t.Fatalf("error = %v, want native Spam rejection", err)
 			}
@@ -119,5 +119,57 @@ func TestManagedLabelsExcludeNativeSpam(t *testing.T) {
 	}
 	if !slices.Contains(labels, LabelTrash) {
 		t.Fatalf("managed labels omit native Gmail trash: %v", labels)
+	}
+}
+
+func TestMailboxRoleLabelsDefaultsAndOverrides(t *testing.T) {
+	mailboxes := []Mailbox{
+		{ID: "trash", Name: "Trash", Role: "trash"},
+		{ID: "junk", Name: "Junk", Role: "junk"},
+		{ID: "parent", Name: "Projects"},
+		{ID: "archive", Name: "Old", Role: "archive", ParentID: "parent"},
+	}
+	for _, tc := range []struct {
+		name                 string
+		roles                map[string]string
+		trash, junk, archive string
+	}{
+		{name: "nil", trash: "Fastmail_Trash", junk: "Fastmail_Spam", archive: "Projects/Old"},
+		{name: "empty map", roles: map[string]string{}, trash: "Fastmail_Trash", junk: "Fastmail_Spam", archive: "Projects/Old"},
+		{name: "other role only", roles: map[string]string{"sent": "Sent copy"}, trash: "Fastmail_Trash", junk: "Fastmail_Spam", archive: "Projects/Old"},
+		{name: "trash override", roles: map[string]string{"trash": " Custom Trash "}, trash: "Custom Trash", junk: "Fastmail_Spam", archive: "Projects/Old"},
+		{name: "junk override", roles: map[string]string{"junk": "Custom Junk"}, trash: "Fastmail_Trash", junk: "Custom Junk", archive: "Projects/Old"},
+		{name: "all overrides", roles: map[string]string{"trash": "Deleted", "junk": "Junk copy", "archive": "Archive copy"}, trash: "Deleted", junk: "Junk copy", archive: "Archive copy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			names, err := MailboxLabelNames(mailboxes, tc.roles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if names["trash"] != tc.trash || names["junk"] != tc.junk || names["archive"] != tc.archive {
+				t.Fatalf("role mapping=%v want trash=%q junk=%q archive=%q", names, tc.trash, tc.junk, tc.archive)
+			}
+		})
+	}
+}
+
+func TestMailboxRoleLabelsRejectInvalidSpecialOverridesWithoutMailboxes(t *testing.T) {
+	for _, roles := range []map[string]string{
+		{"trash": ""}, {"trash": " \t "}, {"junk": ""}, {"junk": " \n "},
+		{"trash": "Fastmail_Spam"}, {"junk": "fastmail_trash"},
+		{"trash": " Shared ", "junk": "shared"},
+	} {
+		if _, err := MailboxLabelNames(nil, roles); err == nil {
+			t.Fatalf("invalid role labels accepted without mailboxes: %#v", roles)
+		}
+	}
+	for _, role := range []string{"trash", "junk"} {
+		for _, system := range []string{LabelInbox, LabelSent, LabelDraft, LabelImportant, LabelStarred, LabelUnread, LabelSpam, LabelTrash, "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS"} {
+			t.Run(role+"/"+system, func(t *testing.T) {
+				if _, err := MailboxLabelNames(nil, map[string]string{role: " " + strings.ToLower(system) + " "}); err == nil {
+					t.Fatalf("system label accepted for %s: %s", role, system)
+				}
+			})
+		}
 	}
 }

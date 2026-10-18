@@ -43,6 +43,11 @@ to repair.
 - The next reconcile reverts Gmail-side label changes.
 - The tool inserts a mapped message again if it vanishes from Gmail.
 
+`role_labels` is the sole override for mailbox role labels. Missing `trash`
+and `junk` overrides use `Fastmail_Trash` and `Fastmail_Spam`. Archive has no
+special default override. The config decoder rejects the removed `trash_label`
+and `spam_label` fields before startup writes; there is no automatic migration.
+
 ## Folder selection
 
 `fastmail.include_mailboxes` defines the source view in every sync mode.

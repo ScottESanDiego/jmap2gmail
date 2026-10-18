@@ -28,8 +28,6 @@ type Options struct {
 	Apply            bool
 	Delete           bool
 	Full             bool
-	TrashLabel       string
-	SpamLabel        string
 	RoleLabels       map[string]string
 	BatchSize        int
 	Output           io.Writer
@@ -112,7 +110,7 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 	if err := e.prepareMailboxScope(mailboxes); err != nil {
 		return Result{}, err
 	}
-	e.mailboxNames, err = MailboxLabelNamesWithRoles(mailboxes, e.Options.TrashLabel, e.Options.SpamLabel, e.Options.RoleLabels)
+	e.mailboxNames, err = MailboxLabelNames(mailboxes, e.Options.RoleLabels)
 	if err != nil {
 		return Result{}, err
 	}
@@ -227,12 +225,6 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 func (e *Engine) defaults() {
 	if e.now == nil {
 		e.now = time.Now
-	}
-	if e.Options.TrashLabel == "" {
-		e.Options.TrashLabel = "Fastmail_Trash"
-	}
-	if e.Options.SpamLabel == "" {
-		e.Options.SpamLabel = "Fastmail_Spam"
 	}
 	if e.Options.BatchSize <= 0 {
 		e.Options.BatchSize = 500

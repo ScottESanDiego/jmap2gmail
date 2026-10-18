@@ -87,6 +87,28 @@ A dry run reads Fastmail, Gmail, the config, credentials, and any existing
 cache. It writes no Gmail data, cache, lock, temporary state, or OAuth token.
 The required credential and token files must already exist.
 
+## Role labels
+
+Use `role_labels` to override Gmail labels for Fastmail mailbox roles. It is
+the only role-label setting. Omitted `trash` and `junk` entries default to
+`Fastmail_Trash` and `Fastmail_Spam`. Trash and Junk overrides must be nonblank,
+distinct ordinary Gmail labels; native Trash and Spam are invalid.
+The role key for Junk is `junk`, not `spam`.
+The example config also sets `archive` to `Fastmail_Archive`; this is an
+explicit override, not an automatic default.
+
+The old `trash_label` and `spam_label` fields now cause a config error. Replace
+`"trash_label": "X"` and `"spam_label": "Y"` with:
+
+```json
+"role_labels": {
+  "trash": "X",
+  "junk": "Y"
+}
+```
+
+Remove the old fields; the tool does not convert them or accept aliases.
+
 ## Select Fastmail folders
 
 Set `include_mailboxes` in the config's existing `fastmail` object to mirror

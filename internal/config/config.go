@@ -14,8 +14,6 @@ type Config struct {
 	Gmail      Gmail             `json:"gmail"`
 	StateFile  string            `json:"state_file"`
 	Delete     bool              `json:"delete"`
-	TrashLabel string            `json:"trash_label"`
-	SpamLabel  string            `json:"spam_label"`
 	RoleLabels map[string]string `json:"role_labels,omitempty"`
 }
 
@@ -46,12 +44,6 @@ func Load(path string) (Config, error) {
 	}
 	if config.StateFile == "" {
 		config.StateFile = "~/.local/state/jmapsync/state.json"
-	}
-	if config.TrashLabel == "" {
-		config.TrashLabel = "Fastmail_Trash"
-	}
-	if config.SpamLabel == "" {
-		config.SpamLabel = "Fastmail_Spam"
 	}
 	if config.Gmail.TokenFile == "" {
 		config.Gmail.TokenFile = "~/.config/jmapsync/google-token.json"
