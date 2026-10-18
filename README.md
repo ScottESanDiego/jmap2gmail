@@ -40,7 +40,7 @@ stop the run with repair guidance.
 
 ## Setup
 
-Requires Go 1.25 or newer.
+Requires Go 1.27.2 or newer.
 
 1. Copy `config.example.json` to `config.json`. Update its paths. Relative paths
    use the config directory, and the tool expands `~/`.
@@ -76,6 +76,22 @@ spam. It also reports that Gmail and state stay unchanged.
 A dry run reads Fastmail, Gmail, the config, credentials, and any existing
 cache. It writes no Gmail data, cache, lock, temporary state, or OAuth token.
 The required credential and token files must already exist.
+
+## OAuth token renewal
+
+`google-auth` saves an access token, its expiry, and a refresh token. Sync checks
+credentials before starting reconciliation. Expired access tokens are renewed
+automatically, including during long runs.
+
+Apply runs save renewed credentials immediately using an atomic replacement
+with `0600` permissions. A separate `<gmail.token_file>.lock` serializes token
+loading, renewal, and saving across processes, including `--no-cache` runs.
+Lock waits stop after five seconds; refresh requests time out after 30 seconds.
+The token directory must be writable. Token locking protects credentials;
+cacheless syncs still need an external lock to prevent overlapping Gmail work.
+
+Dry runs renew tokens only in memory and create no token lock or token files.
+If Google revokes or expires the refresh token, run `google-auth` again.
 
 ## Optional cache
 
@@ -128,7 +144,8 @@ Cached runs may omit `--no-cache`. Their state lock also blocks overlap.
 - `config.json`: settings and paths; protect it if it reveals private paths
 - Fastmail token: a credential
 - Google client JSON: OAuth client data
-- Google OAuth token: `google-auth` creates this credential
+- Google OAuth token: `google-auth` creates it; apply runs save renewals
+- `<gmail.token_file>.lock`: protects authorization and apply-time token renewal
 - State JSON: an optional cache
 - `<state_file>.lock`: an apply-time lock for cached runs
 

@@ -96,6 +96,22 @@ A dry run mutates no Gmail or Fastmail data. It also writes no cache, state
 lock, temporary state, or OAuth token. It may read an existing cache and needs
 existing credential files.
 
+## OAuth renewal
+
+Sync validates or renews the Google token before starting reconciliation.
+Apply runs use a token source that holds `<gmail.token_file>.lock` across
+reload, renewal, and atomic save. It saves each renewed token before returning
+it to the HTTP transport, including renewals during long syncs. An omitted
+refresh token preserves the existing value. Change detection includes access
+token, refresh token, token type, and expiry. Token files use `0600` permissions.
+The lock is independent of the optional state cache and also protects token
+writes from `google-auth`. Lock waits are cancellable with a five-second limit;
+renewal requests have a 30-second timeout. This lock does not serialize Gmail
+sync work.
+
+Dry runs use an in-memory OAuth token source with no credential or lock writes.
+An invalid refresh grant requires explicit `google-auth` reauthorization.
+
 ## Permissions and libraries
 
 The Gmail scope is `gmail.modify`. The tool needs it to read metadata and

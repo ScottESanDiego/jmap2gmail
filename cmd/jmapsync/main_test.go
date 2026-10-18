@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"flag"
 	"os"
@@ -13,7 +12,7 @@ import (
 
 func TestSyncHelpStatesOperationalContract(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	err := run(context.Background(), []string{"sync", "-h"}, &stdout, &stderr)
+	err := run(t.Context(), []string{"sync", "-h"}, &stdout, &stderr)
 	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("sync -h error = %v, want flag.ErrHelp", err)
 	}
@@ -33,7 +32,7 @@ func TestSyncHelpStatesOperationalContract(t *testing.T) {
 
 func TestTopLevelHelpSaysSyncPlansByDefault(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if err := run(context.Background(), []string{"help"}, &stdout, &stderr); err != nil {
+	if err := run(t.Context(), []string{"help"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stdout.String(), "sync         plan a mirror run") {

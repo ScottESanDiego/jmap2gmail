@@ -1,7 +1,6 @@
 package fastmail
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,7 +46,7 @@ func TestClientMapsJMAPResponses(t *testing.T) {
 		return response(http.StatusOK, "application/json", payload, request), nil
 	})
 	client := testClient(transport)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	mailboxes, err := client.Mailboxes(ctx)
 	if err != nil {
@@ -119,7 +118,7 @@ func TestAllEmailIDsAdvancesByReturnedPageSize(t *testing.T) {
 		}
 		return response(http.StatusOK, "application/json", payload, request), nil
 	})
-	ids, err := testClient(transport).AllEmailIDs(context.Background())
+	ids, err := testClient(transport).AllEmailIDs(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 
 	"google.golang.org/api/gmail/v1"
@@ -287,11 +287,11 @@ func (c *Client) ChangesSince(ctx context.Context, start uint64) ([]string, erro
 	for id := range set {
 		result = append(result, id)
 	}
-	sort.Strings(result)
+	slices.Sort(result)
 	return result, nil
 }
 
 func isHTTPStatus(err error, status int) bool {
-	var apiErr *googleapi.Error
-	return errors.As(err, &apiErr) && apiErr.Code == status
+	apiErr, ok := errors.AsType[*googleapi.Error](err)
+	return ok && apiErr.Code == status
 }

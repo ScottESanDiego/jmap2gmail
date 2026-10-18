@@ -2,7 +2,7 @@ package syncer
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -160,7 +160,7 @@ func DesiredLabelNames(email Email, mailboxNames map[string]string) ([]string, e
 	for label := range set {
 		labels = append(labels, label)
 	}
-	sort.Strings(labels)
+	slices.Sort(labels)
 	return labels, nil
 }
 
@@ -182,6 +182,6 @@ func ManagedLabelNames(mailboxNames map[string]string) []string {
 	for label := range set {
 		labels = append(labels, label)
 	}
-	sort.Strings(labels)
+	slices.Sort(labels)
 	return labels
 }

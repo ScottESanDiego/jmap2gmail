@@ -100,7 +100,7 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err != nil {
 		return err
 	}
-	httpClient, err := gmailapi.AuthenticatedClient(ctx, settings.Gmail.CredentialsFile, settings.Gmail.TokenFile)
+	httpClient, err := gmailapi.AuthenticatedClient(ctx, settings.Gmail.CredentialsFile, settings.Gmail.TokenFile, *apply)
 	if err != nil {
 		return err
 	}
@@ -136,7 +136,8 @@ const syncHelp = `Usage: jmapsync sync [options]
 
 Plans use zero persistent writes by default. Use --apply to change Gmail and update the optional cache.
 Run this one-shot command from cron every 5-15 minutes. It has no daemon mode.
---no-cache keeps state only in memory and creates no state or lock. Prevent overlap with an external lock.
+--no-cache keeps state only in memory and creates no state or state lock. Prevent overlap with an external lock.
+Apply runs persist OAuth renewals under a separate token lock, including with --no-cache.
 New inserts carry one X-Jmapsync-Account header, one X-Jmapsync-Email-ID header, and one account-specific jmapsync-managed label.
 The tool adopts existing mail only when one source and one Gmail message share a Message-ID.
 Source deletions use Gmail Trash. The tool ignores Gmail-native SPAM.

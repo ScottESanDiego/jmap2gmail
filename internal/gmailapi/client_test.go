@@ -1,11 +1,11 @@
 package gmailapi
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -39,7 +39,7 @@ func TestFindByMessageIDFetchesCandidateLabels(t *testing.T) {
 		}, nil
 	})}
 
-	service, err := gmail.NewService(context.Background(),
+	service, err := gmail.NewService(t.Context(),
 		option.WithEndpoint("https://gmail.test/"),
 		option.WithHTTPClient(httpClient),
 		option.WithoutAuthentication(),
@@ -48,7 +48,7 @@ func TestFindByMessageIDFetchesCandidateLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &Client{service: service, user: "me"}
-	got, err := client.FindByMessageID(context.Background(), "<m1@example.com>")
+	got, err := client.FindByMessageID(t.Context(), "<m1@example.com>")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,11 +102,11 @@ func TestFindByMessageIDPaginatesAndPreservesEveryCandidate(t *testing.T) {
 			Request:    request,
 		}, nil
 	})}
-	service, err := gmail.NewService(context.Background(), option.WithEndpoint("https://gmail.test/"), option.WithHTTPClient(httpClient), option.WithoutAuthentication())
+	service, err := gmail.NewService(t.Context(), option.WithEndpoint("https://gmail.test/"), option.WithHTTPClient(httpClient), option.WithoutAuthentication())
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := (&Client{service: service, user: "me"}).FindByMessageID(context.Background(), "m1@example.com")
+	got, err := (&Client{service: service, user: "me"}).FindByMessageID(t.Context(), "m1@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestManagedMessagesPaginatesAndFetchesIdentityMetadata(t *testing.T) {
 			}
 			headers := request.URL.Query()["metadataHeaders"]
 			for _, want := range []string{syncer.HeaderAccount, syncer.HeaderEmailID, "Message-ID"} {
-				if !contains(headers, want) {
+				if !slices.Contains(headers, want) {
 					t.Errorf("metadataHeaders = %#v, missing %q", headers, want)
 				}
 			}
@@ -161,11 +161,11 @@ func TestManagedMessagesPaginatesAndFetchesIdentityMetadata(t *testing.T) {
 			Body: io.NopCloser(strings.NewReader(body)), Request: request,
 		}, nil
 	})}
-	service, err := gmail.NewService(context.Background(), option.WithEndpoint("https://gmail.test/"), option.WithHTTPClient(httpClient), option.WithoutAuthentication())
+	service, err := gmail.NewService(t.Context(), option.WithEndpoint("https://gmail.test/"), option.WithHTTPClient(httpClient), option.WithoutAuthentication())
 	if err != nil {
 		t.Fatal(err)
 	}
-	messages, err := (&Client{service: service, user: "me"}).ManagedMessages(context.Background(), "marker-id")
+	messages, err := (&Client{service: service, user: "me"}).ManagedMessages(t.Context(), "marker-id")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,15 +175,6 @@ func TestManagedMessagesPaginatesAndFetchesIdentityMetadata(t *testing.T) {
 	if got := messages[0].EmailIDHeaders; !reflect.DeepEqual(got, []string{"e1", "e1-duplicate"}) {
 		t.Fatalf("duplicate identity headers = %#v", got)
 	}
-}
-
-func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 func TestTrashUsesGmailTrashEndpoint(t *testing.T) {
@@ -198,7 +189,7 @@ func TestTrashUsesGmailTrashEndpoint(t *testing.T) {
 			Request:    request,
 		}, nil
 	})}
-	service, err := gmail.NewService(context.Background(),
+	service, err := gmail.NewService(t.Context(),
 		option.WithEndpoint("https://gmail.test/"),
 		option.WithHTTPClient(httpClient),
 		option.WithoutAuthentication(),
@@ -207,7 +198,7 @@ func TestTrashUsesGmailTrashEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &Client{service: service, user: "me"}
-	if err := client.Trash(context.Background(), "g1"); err != nil {
+	if err := client.Trash(t.Context(), "g1"); err != nil {
 		t.Fatal(err)
 	}
 	if method != http.MethodPost || path != "/gmail/v1/users/me/messages/g1/trash" {
@@ -232,7 +223,7 @@ func TestChangesSinceReturnsSortedUniqueMessageIDs(t *testing.T) {
 			Request:    request,
 		}, nil
 	})}
-	service, err := gmail.NewService(context.Background(),
+	service, err := gmail.NewService(t.Context(),
 		option.WithEndpoint("https://gmail.test/"),
 		option.WithHTTPClient(httpClient),
 		option.WithoutAuthentication(),
@@ -240,7 +231,7 @@ func TestChangesSinceReturnsSortedUniqueMessageIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := (&Client{service: service, user: "me"}).ChangesSince(context.Background(), 10)
+	got, err := (&Client{service: service, user: "me"}).ChangesSince(t.Context(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}

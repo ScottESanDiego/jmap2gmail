@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"time"
 
@@ -177,9 +178,7 @@ func (c *Client) Emails(ctx context.Context, ids []string) ([]syncer.Email, erro
 				mailboxIDs[string(id)] = present
 			}
 			keywords := make(map[string]bool, len(item.Keywords))
-			for keyword, present := range item.Keywords {
-				keywords[keyword] = present
-			}
+			maps.Copy(keywords, item.Keywords)
 			result = append(result, syncer.Email{
 				ID: string(item.ID), BlobID: string(item.BlobID),
 				MailboxIDs: mailboxIDs, Keywords: keywords,
@@ -195,8 +194,7 @@ func (c *Client) Changes(ctx context.Context, since string) (syncer.Changes, err
 		Account: c.account, SinceState: since, MaxChanges: defaultPageSize,
 	})
 	if err != nil {
-		var methodErr *jmap.MethodError
-		if errors.As(err, &methodErr) && methodErr.Type == "cannotCalculateChanges" {
+		if methodErr, ok := errors.AsType[*jmap.MethodError](err); ok && methodErr.Type == "cannotCalculateChanges" {
 			return syncer.Changes{}, fmt.Errorf("%w: %v", syncer.ErrCannotCalculateChanges, err)
 		}
 		return syncer.Changes{}, fmt.Errorf("Email/changes: %w", err)

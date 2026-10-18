@@ -3,14 +3,15 @@ package syncer
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
-	"sort"
 	"strings"
 
 	"jmapsync/internal/store"
@@ -234,7 +235,7 @@ func (e *Engine) preflightRebuild(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	sort.Slice(messages, func(i, j int) bool { return messages[i].ID < messages[j].ID })
+	slices.SortFunc(messages, func(a, b Message) int { return cmp.Compare(a.ID, b.ID) })
 	claimedGmail := make(map[string]string)
 	legacy := make(map[string][]Message)
 	for _, message := range messages {
@@ -280,12 +281,7 @@ func (e *Engine) preflightRebuild(ctx context.Context) error {
 		messageID := effectiveMessageID(email)
 		sourcesByMessageID[messageID] = append(sourcesByMessageID[messageID], sourceID)
 	}
-	legacyMessageIDs := make([]string, 0, len(legacy))
-	for messageID := range legacy {
-		legacyMessageIDs = append(legacyMessageIDs, messageID)
-	}
-	sort.Strings(legacyMessageIDs)
-	for _, messageID := range legacyMessageIDs {
+	for _, messageID := range slices.Sorted(maps.Keys(legacy)) {
 		candidates := legacy[messageID]
 		sourceIDs := sourcesByMessageID[messageID]
 		if len(candidates) > 1 || len(sourceIDs) > 1 {
@@ -314,12 +310,7 @@ func (e *Engine) preflightAdoptions(ctx context.Context, claimedGmail map[string
 			byMessageID[effectiveMessageID(email)] = append(byMessageID[effectiveMessageID(email)], sourceID)
 		}
 	}
-	messageIDs := make([]string, 0, len(byMessageID))
-	for messageID := range byMessageID {
-		messageIDs = append(messageIDs, messageID)
-	}
-	sort.Strings(messageIDs)
-	for _, messageID := range messageIDs {
+	for _, messageID := range slices.Sorted(maps.Keys(byMessageID)) {
 		candidates, err := e.Destination.FindByMessageID(ctx, messageID)
 		if err != nil {
 			return err
@@ -327,7 +318,7 @@ func (e *Engine) preflightAdoptions(ctx context.Context, claimedGmail map[string
 		candidates = e.withoutSpamCandidates(candidates)
 		candidates = e.withoutIdentityCandidates(candidates)
 		sourceIDs := byMessageID[messageID]
-		sort.Strings(sourceIDs)
+		slices.Sort(sourceIDs)
 		if len(candidates) > 1 || (len(candidates) == 1 && len(sourceIDs) > 1) {
 			return fmt.Errorf("Gmail Message-ID adoption is ambiguous; remove duplicate messages or add identity headers")
 		}
@@ -355,20 +346,21 @@ func (e *Engine) loadSnapshot(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	sort.Strings(ids)
-	snapshot := make(map[string]Email, len(ids))
-	for start := 0; start < len(ids); start += e.Options.BatchSize {
-		end := min(start+e.Options.BatchSize, len(ids))
-		emails, err := e.Source.Emails(ctx, ids[start:end])
-		if err != nil {
-			return err
-		}
-		for _, email := range emails {
-			snapshot[email.ID] = email
-		}
+	slices.Sort(ids)
+	if len(slices.Compact(append([]string(nil), ids...))) != len(ids) {
+		return errors.New("Fastmail snapshot contains duplicate IDs; retry the sync")
 	}
-	if len(snapshot) != len(ids) {
-		return errors.New("Fastmail snapshot was incomplete; retry the sync")
+	snapshot := make(map[string]Email, len(ids))
+	if err := e.visitEmails(ctx, ids, func(email Email) error {
+		snapshot[email.ID] = email
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, ok := snapshot[id]; !ok {
+			return errors.New("Fastmail snapshot was incomplete; retry the sync")
+		}
 	}
 	e.snapshotAt = baseline
 	e.snapshotIDs = append([]string(nil), ids...)
@@ -425,8 +417,8 @@ func (e *Engine) resolveLabels(ctx context.Context, mailboxes []Mailbox) error {
 
 	var err error
 	orderedMailboxes := append([]Mailbox(nil), mailboxes...)
-	sort.Slice(orderedMailboxes, func(i, j int) bool {
-		return e.mailboxNames[orderedMailboxes[i].ID] < e.mailboxNames[orderedMailboxes[j].ID]
+	slices.SortFunc(orderedMailboxes, func(a, b Mailbox) int {
+		return cmp.Compare(e.mailboxNames[a.ID], e.mailboxNames[b.ID])
 	})
 	for _, mailbox := range orderedMailboxes {
 		name := e.mailboxNames[mailbox.ID]
@@ -499,13 +491,10 @@ func (e *Engine) full(ctx context.Context) error {
 	for _, id := range ids {
 		seen[id] = true
 	}
-	for start := 0; start < len(ids); start += e.Options.BatchSize {
-		end := min(start+e.Options.BatchSize, len(ids))
-		for _, id := range ids[start:end] {
-			sourceEmail := e.snapshot[id]
-			if err := e.syncEmail(ctx, sourceEmail); err != nil {
-				return fmt.Errorf("sync Fastmail email %q: %w", sourceEmail.ID, err)
-			}
+	for _, id := range ids {
+		sourceEmail := e.snapshot[id]
+		if err := e.syncEmail(ctx, sourceEmail); err != nil {
+			return fmt.Errorf("sync Fastmail email %q: %w", sourceEmail.ID, err)
 		}
 	}
 	for _, sourceID := range sortedMessageKeys(e.state.Messages) {
@@ -539,19 +528,14 @@ func (e *Engine) incrementalFrom(ctx context.Context, since string) error {
 				return err
 			}
 		}
-		changedIDs := sortedUniqueStrings(append(append([]string(nil), changes.Created...), changes.Updated...))
-		for start := 0; start < len(changedIDs); start += e.Options.BatchSize {
-			end := min(start+e.Options.BatchSize, len(changedIDs))
-			emails, err := e.Source.Emails(ctx, changedIDs[start:end])
-			if err != nil {
-				return err
+		changedIDs := append(append([]string(nil), changes.Created...), changes.Updated...)
+		if err := e.visitEmails(ctx, changedIDs, func(sourceEmail Email) error {
+			if err := e.syncEmail(ctx, sourceEmail); err != nil {
+				return fmt.Errorf("sync Fastmail email %q: %w", sourceEmail.ID, err)
 			}
-			sort.Slice(emails, func(i, j int) bool { return emails[i].ID < emails[j].ID })
-			for _, sourceEmail := range emails {
-				if err := e.syncEmail(ctx, sourceEmail); err != nil {
-					return fmt.Errorf("sync Fastmail email %q: %w", sourceEmail.ID, err)
-				}
-			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		if e.Options.Apply {
 			e.state.EmailState = changes.NewState
@@ -572,7 +556,7 @@ func (e *Engine) syncEmail(ctx context.Context, sourceEmail Email) error {
 		return err
 	}
 	desiredNames = append(desiredNames, e.managedLabel)
-	sort.Strings(desiredNames)
+	slices.Sort(desiredNames)
 	desiredIDs, complete := e.namesToIDs(desiredNames)
 	record, mapped := e.state.Messages[sourceEmail.ID]
 	if mapped && record.GmailID != "" {
@@ -668,8 +652,8 @@ func (e *Engine) reconcile(ctx context.Context, message Message, desired, desire
 			remove = append(remove, id)
 		}
 	}
-	sort.Strings(add)
-	sort.Strings(remove)
+	slices.Sort(add)
+	slices.Sort(remove)
 	if len(add) == 0 && len(remove) == 0 {
 		e.result.Unchanged++
 		return nil
@@ -692,7 +676,7 @@ func (e *Engine) labelNamesForIDs(ids []string) []string {
 		}
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 
@@ -774,7 +758,7 @@ func (e *Engine) processTombstones(ctx context.Context) error {
 
 func (e *Engine) withoutSpamCandidates(candidates []Message) []Message {
 	candidates = append([]Message(nil), candidates...)
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	slices.SortFunc(candidates, func(a, b Message) int { return cmp.Compare(a.ID, b.ID) })
 	result := make([]Message, 0, len(candidates))
 	for _, candidate := range candidates {
 		if hasLabelID(candidate, LabelSpam) {
@@ -829,7 +813,6 @@ func (e *Engine) reconcileAllDestination(ctx context.Context) error {
 			sourceIDs = append(sourceIDs, sourceID)
 		}
 	}
-	sort.Strings(sourceIDs)
 	return e.reconcileSourceIDs(ctx, sourceIDs)
 }
 
@@ -838,7 +821,7 @@ func sortedMessageKeys(messages map[string]store.Message) []string {
 	for key := range messages {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	return keys
 }
 
@@ -855,22 +838,46 @@ func (e *Engine) reconcileDestinationIDs(ctx context.Context, gmailIDs []string)
 			sourceIDs = append(sourceIDs, sourceID)
 		}
 	}
-	sort.Strings(sourceIDs)
 	return e.reconcileSourceIDs(ctx, sourceIDs)
 }
 
 func (e *Engine) reconcileSourceIDs(ctx context.Context, sourceIDs []string) error {
-	sourceIDs = sortedUniqueStrings(sourceIDs)
-	for start := 0; start < len(sourceIDs); start += e.Options.BatchSize {
-		end := min(start+e.Options.BatchSize, len(sourceIDs))
-		emails, err := e.Source.Emails(ctx, sourceIDs[start:end])
+	return e.visitEmails(ctx, sourceIDs, func(sourceEmail Email) error {
+		if err := e.syncEmail(ctx, sourceEmail); err != nil {
+			return fmt.Errorf("reconcile Gmail change for Fastmail email %q: %w", sourceEmail.ID, err)
+		}
+		return nil
+	})
+}
+
+// visitEmails validates each complete response batch before visiting emails in
+// ID order. Missing emails are allowed because they may have been deleted since
+// the IDs were read; a full snapshot separately requires complete metadata.
+func (e *Engine) visitEmails(ctx context.Context, ids []string, visit func(Email) error) error {
+	ids = sortedUniqueStrings(ids)
+	for batch := range slices.Chunk(ids, e.Options.BatchSize) {
+		emails, err := e.Source.Emails(ctx, batch)
 		if err != nil {
 			return err
 		}
-		sort.Slice(emails, func(i, j int) bool { return emails[i].ID < emails[j].ID })
-		for _, sourceEmail := range emails {
-			if err := e.syncEmail(ctx, sourceEmail); err != nil {
-				return fmt.Errorf("reconcile Gmail change for Fastmail email %q: %w", sourceEmail.ID, err)
+		requested := sliceSet(batch)
+		seen := make(map[string]bool, len(emails))
+		for _, email := range emails {
+			if email.ID == "" {
+				return errors.New("Fastmail returned an email with an empty ID")
+			}
+			if !requested[email.ID] {
+				return fmt.Errorf("Fastmail returned unrequested email %q", email.ID)
+			}
+			if seen[email.ID] {
+				return fmt.Errorf("Fastmail returned duplicate email %q", email.ID)
+			}
+			seen[email.ID] = true
+		}
+		slices.SortFunc(emails, func(a, b Email) int { return cmp.Compare(a.ID, b.ID) })
+		for _, email := range emails {
+			if err := visit(email); err != nil {
+				return err
 			}
 		}
 	}
@@ -888,7 +895,7 @@ func (e *Engine) namesToIDs(names []string) ([]string, bool) {
 		}
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids, complete
 }
 
@@ -979,6 +986,6 @@ func uniqueStrings(values []string) []string {
 
 func sortedUniqueStrings(values []string) []string {
 	result := uniqueStrings(values)
-	sort.Strings(result)
+	slices.Sort(result)
 	return result
 }

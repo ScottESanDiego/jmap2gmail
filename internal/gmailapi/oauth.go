@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"golang.org/x/sys/unix"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -31,16 +32,113 @@ func OAuthConfig(credentialsPath string) (*oauth2.Config, error) {
 	return config, nil
 }
 
-func AuthenticatedClient(ctx context.Context, credentialsPath, tokenPath string) (*http.Client, error) {
+// AuthenticatedClient refreshes credentials before sync work begins. Persistent
+// renewal is enabled only for apply runs; dry runs never create token artifacts.
+func AuthenticatedClient(ctx context.Context, credentialsPath, tokenPath string, persist bool) (*http.Client, error) {
 	config, err := OAuthConfig(credentialsPath)
 	if err != nil {
 		return nil, err
 	}
-	token, err := loadToken(tokenPath)
-	if err != nil {
+	var source oauth2.TokenSource
+	if persist {
+		source = &persistentTokenSource{ctx: ctx, config: config, path: tokenPath}
+	} else {
+		token, err := loadToken(tokenPath)
+		if err != nil {
+			return nil, err
+		}
+		source = config.TokenSource(ctx, token)
+	}
+	if _, err := source.Token(); err != nil {
+		if !persist {
+			err = tokenRenewalError(err)
+		}
 		return nil, err
 	}
-	return config.Client(ctx, token), nil
+	return oauth2.NewClient(ctx, source), nil
+}
+
+// Each call reloads under the stable sidecar lock, so separate processes see
+// newly issued credentials. Persist before returning a renewed token to HTTP.
+type persistentTokenSource struct {
+	ctx    context.Context
+	config *oauth2.Config
+	path   string
+}
+
+func (s *persistentTokenSource) Token() (*oauth2.Token, error) {
+	var token *oauth2.Token
+	err := withTokenLock(s.ctx, s.path, func() error {
+		current, err := loadToken(s.path)
+		if err != nil {
+			return err
+		}
+		if current.Valid() {
+			token = current
+			return nil
+		}
+		refreshCtx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+		defer cancel()
+		renewed, err := s.config.TokenSource(refreshCtx, current).Token()
+		if err != nil {
+			return tokenRenewalError(err)
+		}
+		// Never discard the existing refresh token when Google omits it.
+		if renewed.RefreshToken == "" {
+			renewed.RefreshToken = current.RefreshToken
+		}
+		if tokenChanged(current, renewed) {
+			if err := saveToken(s.path, renewed); err != nil {
+				return err
+			}
+		}
+		token = renewed
+		return nil
+	})
+	return token, err
+}
+
+func tokenChanged(a, b *oauth2.Token) bool {
+	return a.AccessToken != b.AccessToken || a.RefreshToken != b.RefreshToken ||
+		a.TokenType != b.TokenType || !a.Expiry.Equal(b.Expiry)
+}
+
+func tokenRenewalError(err error) error {
+	if response, ok := errors.AsType[*oauth2.RetrieveError](err); ok && response.ErrorCode == "invalid_grant" {
+		return fmt.Errorf("Google OAuth authorization is no longer valid; run jmapsync google-auth again: %w", err)
+	}
+	return fmt.Errorf("renew Google OAuth token: %w", err)
+}
+
+// The lock covers load, refresh, and atomic replacement. A separate inode is
+// essential because renaming the token file would invalidate a lock on it.
+func withTokenLock(ctx context.Context, path string, fn func() error) error {
+	file, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open Google token lock: %w", err)
+	}
+	defer file.Close()
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for {
+		if err := waitCtx.Err(); err != nil {
+			return fmt.Errorf("wait for Google token lock: %w", err)
+		}
+		err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			return fmt.Errorf("lock Google token: %w", err)
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("wait for Google token lock: %w", waitCtx.Err())
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	defer unix.Flock(int(file.Fd()), unix.LOCK_UN)
+	return fn()
 }
 
 func Authorize(ctx context.Context, credentialsPath, tokenPath string, output io.Writer) error {
@@ -126,7 +224,10 @@ func Authorize(ctx context.Context, credentialsPath, tokenPath string, output io
 	if token.RefreshToken == "" {
 		return errors.New("Google returned no refresh token; revoke the app grant and authorize again")
 	}
-	if err := saveToken(tokenPath, token); err != nil {
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		return fmt.Errorf("create Google token directory: %w", err)
+	}
+	if err := withTokenLock(ctx, tokenPath, func() error { return saveToken(tokenPath, token) }); err != nil {
 		return err
 	}
 	fmt.Fprintf(output, "Saved Google OAuth token to %s\n", tokenPath)

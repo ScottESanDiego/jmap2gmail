@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,7 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -125,7 +126,7 @@ func (f *fakeDestination) ManagedMessages(_ context.Context, labelID string) ([]
 			result = append(result, message)
 		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	slices.SortFunc(result, func(a, b Message) int { return cmp.Compare(a.ID, b.ID) })
 	return result, nil
 }
 func (f *fakeDestination) Message(_ context.Context, id string) (Message, error) {
@@ -189,7 +190,7 @@ func (f *fakeDestination) ModifyLabels(_ context.Context, id string, add, remove
 	for label := range set {
 		message.LabelIDs = append(message.LabelIDs, label)
 	}
-	sort.Strings(message.LabelIDs)
+	slices.Sort(message.LabelIDs)
 	f.messages[id] = message
 	return message, nil
 }
@@ -221,7 +222,7 @@ func TestTrashFailurePreservesMappedMessageState(t *testing.T) {
 	_, err := (&Engine{
 		Source: source, Destination: destination, Store: stateStore,
 		Options: Options{Apply: true, Delete: true},
-	}).Run(context.Background())
+	}).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "Gmail rejected trash request") {
 		t.Fatalf("error = %v, want trash failure", err)
 	}
@@ -278,7 +279,7 @@ func TestInitialSyncInsertsAndPersistsCursor(t *testing.T) {
 	}
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{}, byMessageID: map[string][]Message{}}
 	stateStore := &fakeStore{state: store.New()}
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +303,7 @@ func TestMissingMessageIDGetsDeterministicSearchableHeader(t *testing.T) {
 	}
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{}, byMessageID: map[string][]Message{}}
 	stateStore := &fakeStore{state: store.New()}
-	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(context.Background())
+	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +324,7 @@ func TestAdoptionReconcilesManagedLabels(t *testing.T) {
 		byMessageID: map[string][]Message{"m1@example.com": {candidate}},
 	}
 	stateStore := &fakeStore{state: store.New()}
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +343,7 @@ func TestFullSyncTrashesOnlyMappedMessages(t *testing.T) {
 	state := store.New()
 	state.Messages["gone"] = store.Message{GmailID: "g-old"}
 	stateStore := &fakeStore{state: state}
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true, Full: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true, Full: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +370,7 @@ func TestDeletionDisabledKeepsTombstoneUntilEnabled(t *testing.T) {
 	state.Messages["e1"] = store.Message{GmailID: "g1"}
 	stateStore := &fakeStore{state: state}
 
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +382,7 @@ func TestDeletionDisabledKeepsTombstoneUntilEnabled(t *testing.T) {
 	}
 
 	source.changes = nil
-	result, err = (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true}}).Run(context.Background())
+	result, err = (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +410,7 @@ func TestNativeGmailSpamIsNotAdopted(t *testing.T) {
 		byMessageID: map[string][]Message{"m1@example.com": {spam, mirror}},
 	}
 	stateStore := &fakeStore{state: store.New()}
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +437,7 @@ func TestMappedNativeGmailSpamIsNotModified(t *testing.T) {
 	state.EmailState = "s1"
 	state.Messages["e1"] = store.Message{GmailID: "g1"}
 	stateStore := &fakeStore{state: state}
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +458,7 @@ func TestDestroyedNativeGmailSpamIsNotTrashed(t *testing.T) {
 	state.EmailState = "s1"
 	state.Messages["e1"] = store.Message{GmailID: "g1"}
 	stateStore := &fakeStore{state: state}
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +488,7 @@ func TestAmbiguousMessageIDInsertsInsteadOfAdopting(t *testing.T) {
 		byMessageID: map[string][]Message{"m1@example.com": {{ID: "g1"}, {ID: "g2"}}},
 	}
 	stateStore := &fakeStore{state: store.New()}
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +505,7 @@ func TestDryRunDoesNotMutateDestinationOrState(t *testing.T) {
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{}, byMessageID: map[string][]Message{}}
 	stateStore := &fakeStore{state: store.New()}
 	var output bytes.Buffer
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Output: &output}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Output: &output}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +550,7 @@ func TestIncrementalDryRunActionsAreSorted(t *testing.T) {
 	_, err := (&Engine{
 		Source: source, Destination: destination, Store: &fakeStore{state: state},
 		Options: Options{Delete: true, Output: &output},
-	}).Run(context.Background())
+	}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +575,7 @@ func TestIncrementalHistoryExpiryFallsBackToFull(t *testing.T) {
 	state := store.New()
 	state.EmailState = "expired"
 	stateStore := &fakeStore{state: state}
-	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(context.Background())
+	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -595,7 +596,7 @@ func TestGmailHistoryRepairsDestinationLabelDrift(t *testing.T) {
 	state.GmailHistoryID = 10
 	state.Messages["e1"] = store.Message{GmailID: "g1"}
 	stateStore := &fakeStore{state: state}
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -639,7 +640,7 @@ func TestGmailHistoryDryRunActionsAreSortedBySourceID(t *testing.T) {
 	_, err := (&Engine{
 		Source: source, Destination: destination, Store: &fakeStore{state: state},
 		Options: Options{Output: &output},
-	}).Run(context.Background())
+	}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +671,7 @@ func TestGmailHistoryReinsertsDeletedMappedMessage(t *testing.T) {
 	state.GmailHistoryID = 10
 	state.Messages["e1"] = store.Message{GmailID: "g1"}
 	stateStore := &fakeStore{state: state}
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,7 +698,7 @@ func TestRememberSkipsUnchangedStateWrite(t *testing.T) {
 }
 
 func TestEngineRequiresDependencies(t *testing.T) {
-	_, err := (&Engine{}).Run(context.Background())
+	_, err := (&Engine{}).Run(t.Context())
 	if err == nil {
 		t.Fatal("expected dependency error")
 	}
@@ -709,7 +710,7 @@ func TestAccountBindingFailsBeforeMutation(t *testing.T) {
 	state := store.New()
 	state.SourceAccount = "old-account"
 	stateStore := &fakeStore{state: state}
-	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true}}).Run(context.Background())
+	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true}}).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "state belongs to another Fastmail account") {
 		t.Fatalf("error = %v, want Fastmail account mismatch", err)
 	}
@@ -731,7 +732,7 @@ func TestMissingCacheRebuildsManagedMapping(t *testing.T) {
 	state.RebuildReason = "is missing"
 	stateStore := &fakeStore{state: state}
 
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true, Delete: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -744,7 +745,7 @@ func TestRepeatedCachelessRunsInsertOnce(t *testing.T) {
 	source := oneMessageSource()
 	destination := &fakeDestination{labels: standardLabelsWithoutMarker(), messages: map[string]Message{}, byMessageID: map[string][]Message{}}
 	for range 2 {
-		_, err := (&Engine{Source: source, Destination: destination, Store: store.NewMemory(), Options: Options{Apply: true, Delete: true}}).Run(context.Background())
+		_, err := (&Engine{Source: source, Destination: destination, Store: store.NewMemory(), Options: Options{Apply: true, Delete: true}}).Run(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -768,7 +769,7 @@ func TestIncrementalInsertIsRecoveredAfterMappingSaveFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	failing := &failNthSaveStore{file: store.File{Path: path}, failAt: 3}
-	_, err := (&Engine{Source: source, Destination: destination, Store: failing, Options: Options{Apply: true}}).Run(context.Background())
+	_, err := (&Engine{Source: source, Destination: destination, Store: failing, Options: Options{Apply: true}}).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "simulated mapping save failure") {
 		t.Fatalf("error = %v, want mapping save failure", err)
 	}
@@ -795,7 +796,7 @@ func TestIncrementalInsertIsRecoveredAfterMappingSaveFails(t *testing.T) {
 		t.Fatalf("failed mapping save persisted mapping: %#v", persisted.Messages)
 	}
 
-	if _, err := (&Engine{Source: source, Destination: destination, Store: store.File{Path: path}, Options: Options{Apply: true}}).Run(context.Background()); err != nil {
+	if _, err := (&Engine{Source: source, Destination: destination, Store: store.File{Path: path}, Options: Options{Apply: true}}).Run(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	recovered, err := (store.File{Path: path}).Load()
@@ -822,7 +823,7 @@ func TestIncompleteCheckpointFailurePreventsGmailMutation(t *testing.T) {
 	}
 	failing := &failNthSaveStore{file: store.File{Path: path}, failAt: 1}
 
-	_, err := (&Engine{Source: source, Destination: destination, Store: failing, Options: Options{Apply: true, Delete: true}}).Run(context.Background())
+	_, err := (&Engine{Source: source, Destination: destination, Store: failing, Options: Options{Apply: true, Delete: true}}).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "simulated mapping save failure") {
 		t.Fatalf("error = %v, want checkpoint failure", err)
 	}
@@ -846,7 +847,7 @@ func TestInsertRewritesIdentityHeadersAndPreservesBody(t *testing.T) {
 	body := "body\x00bytes\r\nunchanged"
 	source.raw["b1"] = "x-jmapsync-account: attacker\r\n\tfolded\r\nX-JMAPSYNC-EMAIL-ID: wrong\r\n more\r\nSubject: keep\r\n\r\n" + body
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{}, byMessageID: map[string][]Message{}}
-	if _, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: store.New()}, Options: Options{Apply: true}}).Run(context.Background()); err != nil {
+	if _, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: store.New()}, Options: Options{Apply: true}}).Run(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	raw := destination.insertedRaw[0]
@@ -872,7 +873,7 @@ func TestUnmarkedIdentityHeadersAreNotAdopted(t *testing.T) {
 		labels: standardLabels(), messages: map[string]Message{"g1": candidate},
 		byMessageID: map[string][]Message{"m1@example.com": {candidate}},
 	}
-	result, err := (&Engine{Source: oneMessageSource(), Destination: destination, Store: &fakeStore{state: rebuildState("is missing")}, Options: Options{Apply: true}}).Run(context.Background())
+	result, err := (&Engine{Source: oneMessageSource(), Destination: destination, Store: &fakeStore{state: rebuildState("is missing")}, Options: Options{Apply: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -888,7 +889,7 @@ func TestMarkerLabelIsRestored(t *testing.T) {
 	}
 	state := store.New()
 	state.Messages["e1"] = store.Message{GmailID: "g1"}
-	if _, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: state}, Options: Options{Apply: true, Full: true}}).Run(context.Background()); err != nil {
+	if _, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: state}, Options: Options{Apply: true, Full: true}}).Run(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if !hasLabelID(destination.messages["g1"], testManagedLabel()) {
@@ -917,7 +918,7 @@ func TestInvalidRebuildInventoryFailsBeforeMutation(t *testing.T) {
 			for _, message := range inventory {
 				destination.messages[message.ID] = message
 			}
-			_, err := (&Engine{Source: oneMessageSource(), Destination: destination, Store: &fakeStore{state: rebuildState("is corrupt")}, Options: Options{Apply: true, Delete: true}}).Run(context.Background())
+			_, err := (&Engine{Source: oneMessageSource(), Destination: destination, Store: &fakeStore{state: rebuildState("is corrupt")}, Options: Options{Apply: true, Delete: true}}).Run(t.Context())
 			if err == nil {
 				t.Fatal("invalid inventory succeeded")
 			}
@@ -936,7 +937,7 @@ func TestAmbiguousInitialAdoptionFailsBeforeLabelMutation(t *testing.T) {
 		messages:    map[string]Message{},
 		byMessageID: map[string][]Message{"m1@example.com": {{ID: "g1"}, {ID: "g2"}}},
 	}
-	_, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: rebuildState("is missing")}, Options: Options{Apply: true}}).Run(context.Background())
+	_, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: rebuildState("is missing")}, Options: Options{Apply: true}}).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "adoption is ambiguous") {
 		t.Fatalf("error = %v", err)
 	}
@@ -954,7 +955,7 @@ func TestLaterMessageIDPageMakesPreflightAmbiguous(t *testing.T) {
 	}
 	stateStore := &fakeStore{state: rebuildState("is missing")}
 
-	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(context.Background())
+	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "adoption is ambiguous") {
 		t.Fatalf("error = %v, want ambiguous adoption", err)
 	}
@@ -971,7 +972,7 @@ func TestSharedSourceMessageIDFailsSafeDuringRebuild(t *testing.T) {
 		labels: standardLabels(), messages: map[string]Message{},
 		byMessageID: map[string][]Message{"m1@example.com": {{ID: "g1"}}},
 	}
-	_, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: rebuildState("is missing")}, Options: Options{Apply: true}}).Run(context.Background())
+	_, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: rebuildState("is missing")}, Options: Options{Apply: true}}).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "adoption is ambiguous") {
 		t.Fatalf("error = %v", err)
 	}
@@ -988,7 +989,7 @@ func TestCorruptCacheIsNotOverwrittenWhenPreflightFails(t *testing.T) {
 	}
 	source := &fakeSource{stateErr: errors.New("Fastmail unavailable")}
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{}}
-	_, err := (&Engine{Source: source, Destination: destination, Store: store.File{Path: path}, Options: Options{Apply: true}}).Run(context.Background())
+	_, err := (&Engine{Source: source, Destination: destination, Store: store.File{Path: path}, Options: Options{Apply: true}}).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "Fastmail unavailable") {
 		t.Fatalf("error = %v", err)
 	}
@@ -1015,7 +1016,7 @@ func TestRebuildTrashesValidatedOrphanOnly(t *testing.T) {
 		byMessageID: map[string][]Message{},
 	}
 	source := &fakeSource{state: "s1", emails: map[string]Email{}}
-	result, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: rebuildState("is missing")}, Options: Options{Apply: true, Delete: true}}).Run(context.Background())
+	result, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: rebuildState("is missing")}, Options: Options{Apply: true, Delete: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1028,7 +1029,7 @@ func TestFailedFinalCommitLeavesRebuildSignal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{}, byMessageID: map[string][]Message{}}
 	failing := &failFinalStore{file: store.File{Path: path}}
-	_, err := (&Engine{Source: oneMessageSource(), Destination: destination, Store: failing, Options: Options{Apply: true}}).Run(context.Background())
+	_, err := (&Engine{Source: oneMessageSource(), Destination: destination, Store: failing, Options: Options{Apply: true}}).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "simulated final commit failure") {
 		t.Fatalf("error = %v", err)
 	}
@@ -1039,7 +1040,7 @@ func TestFailedFinalCommitLeavesRebuildSignal(t *testing.T) {
 	if !loaded.Rebuild || !loaded.Incomplete {
 		t.Fatalf("loaded state = %#v, want incomplete rebuild", loaded)
 	}
-	if _, err := (&Engine{Source: oneMessageSource(), Destination: destination, Store: store.File{Path: path}, Options: Options{Apply: true}}).Run(context.Background()); err != nil {
+	if _, err := (&Engine{Source: oneMessageSource(), Destination: destination, Store: store.File{Path: path}, Options: Options{Apply: true}}).Run(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if len(destination.inserted) != 1 {
@@ -1057,7 +1058,7 @@ func TestFailedFinalCommitLeavesRebuildSignal(t *testing.T) {
 func TestMalformedMarkedSpamIsIgnoredDuringRebuild(t *testing.T) {
 	spam := Message{ID: "spam", LabelIDs: []string{testManagedLabel(), LabelSpam}, AccountHeaders: []string{"bad", "worse"}}
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{"spam": spam}, byMessageID: map[string][]Message{}}
-	result, err := (&Engine{Source: &fakeSource{state: "s1", emails: map[string]Email{}}, Destination: destination, Store: &fakeStore{state: rebuildState("is missing")}, Options: Options{Apply: true, Delete: true}}).Run(context.Background())
+	result, err := (&Engine{Source: &fakeSource{state: "s1", emails: map[string]Email{}}, Destination: destination, Store: &fakeStore{state: rebuildState("is missing")}, Options: Options{Apply: true, Delete: true}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1081,7 +1082,7 @@ func TestDryRunReportsExactActionsWithoutMutation(t *testing.T) {
 	state.Messages["gone-source"] = store.Message{GmailID: "gone"}
 	stateStore := &fakeStore{state: state}
 	var output bytes.Buffer
-	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Full: true, Delete: true, Output: &output}}).Run(context.Background())
+	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Full: true, Delete: true, Output: &output}}).Run(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
