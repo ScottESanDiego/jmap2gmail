@@ -26,7 +26,7 @@ func AcquireLock(statePath string) (*Lock, error) {
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = file.Close()
 		if errors.Is(err, unix.EWOULDBLOCK) {
-			return nil, fmt.Errorf("another jmapsync --apply run holds %s", path)
+			return nil, fmt.Errorf("another jmapsync sync run holds %s", path)
 		}
 		return nil, fmt.Errorf("lock state: %w", err)
 	}

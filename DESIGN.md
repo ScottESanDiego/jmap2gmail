@@ -88,9 +88,9 @@ work succeeds. A message without an RFC Message-ID gets a deterministic
 
 ## Dry run
 
-`sync` plans by default. `--apply` enables Gmail changes and cache writes. A dry
-run lists each planned label create or rename, insert, adoption, label change,
-Trash move, and native-spam ignore.
+`sync` applies Gmail changes and cache writes by default. `--dry-run` previews
+without persistent writes. A dry run lists each planned label create or rename,
+insert, adoption, label change, Trash move, and native-spam ignore.
 
 A dry run mutates no Gmail or Fastmail data. It also writes no cache, state
 lock, temporary state, or OAuth token. It may read an existing cache and needs

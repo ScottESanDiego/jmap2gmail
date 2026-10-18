@@ -16,27 +16,26 @@ func TestSyncHelpStatesOperationalContract(t *testing.T) {
 	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("sync -h error = %v, want flag.ErrHelp", err)
 	}
-	want := syncHelp + `  -apply
-    	apply planned Gmail changes; cache them unless --no-cache
-  -config string
-    	path to configuration JSON (default "config.json")
-  -full
-    	scan all Fastmail mail instead of using the JMAP cursor
-  -no-cache
-    	rebuild from servers; create no state or state-lock files
-`
+	want := syncHelp + "  -config string\n" +
+		"    \tpath to configuration JSON (default \"config.json\")\n" +
+		"  -dry-run\n" +
+		"    \tpreview changes without writing Gmail, cache, locks, or OAuth tokens\n" +
+		"  -full\n" +
+		"    \tscan all Fastmail mail instead of using the JMAP cursor\n" +
+		"  -no-cache\n" +
+		"    \trebuild from servers; create no state or state-lock files\n"
 	if got := stderr.String(); got != want {
 		t.Fatalf("sync -h =\n%q\nwant\n%q", got, want)
 	}
 }
 
-func TestTopLevelHelpSaysSyncPlansByDefault(t *testing.T) {
+func TestTopLevelHelpDescribesSyncAndDryRun(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if err := run(t.Context(), []string{"help"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "sync         plan a mirror run") {
-		t.Fatalf("help does not describe sync planning:\n%s", stdout.String())
+	if !strings.Contains(stdout.String(), "sync         mirror Fastmail to Gmail; add --dry-run to preview") {
+		t.Fatalf("help does not describe sync and dry-run behavior:\n%s", stdout.String())
 	}
 }
 
@@ -76,5 +75,40 @@ func TestDryRunBackendReadsWithoutCreatingLock(t *testing.T) {
 		if _, err := os.Stat(artifact); !os.IsNotExist(err) {
 			t.Fatalf("dry-run backend created %q", artifact)
 		}
+	}
+}
+
+func TestSyncDefaultAppliesAndDryRunCreatesNoLock(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		args     []string
+		wantLock bool
+	}{
+		{name: "default sync", wantLock: true},
+		{name: "dry run", args: []string{"--dry-run"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			configPath := filepath.Join(root, "config.json")
+			// Fail before any network calls, after the selected state backend opens.
+			config := `{"fastmail":{"token_file":"missing-fastmail-token"},"gmail":{"credentials_file":"client.json","token_file":"token.json"},"state_file":"state/cache.json"}`
+			if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			args := append([]string{"sync", "--config", configPath}, test.args...)
+			var stdout, stderr bytes.Buffer
+			err := run(t.Context(), args, &stdout, &stderr)
+			if err == nil || !strings.Contains(err.Error(), "read Fastmail API token") {
+				t.Fatalf("sync error = %v", err)
+			}
+			lockPath := filepath.Join(root, "state", "cache.json.lock")
+			_, err = os.Stat(lockPath)
+			if test.wantLock && err != nil {
+				t.Fatalf("default sync did not acquire state lock: %v", err)
+			}
+			if !test.wantLock && !os.IsNotExist(err) {
+				t.Fatalf("dry run created state lock: %v", err)
+			}
+		})
 	}
 }

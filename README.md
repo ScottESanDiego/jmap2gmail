@@ -65,13 +65,14 @@ Requires Go 1.27.2 or newer.
 5. Preview and apply the first run:
 
    ```sh
+   go run ./cmd/jmapsync sync -config config.json --full --dry-run
    go run ./cmd/jmapsync sync -config config.json --full
-   go run ./cmd/jmapsync sync -config config.json --full --apply
    ```
 
-`sync` is a dry run unless you pass `--apply`. It lists planned label creation,
-renames, inserts, adoptions, label changes, Trash moves, and ignored native
-spam. It also reports that Gmail and state stay unchanged.
+`sync` applies changes by default. Pass `--dry-run` to preview without writes.
+A dry run lists planned label creation, renames, inserts, adoptions, label
+changes, Trash moves, and ignored native spam. It also reports that Gmail and
+state stay unchanged.
 
 A dry run reads Fastmail, Gmail, the config, credentials, and any existing
 cache. It writes no Gmail data, cache, lock, temporary state, or OAuth token.
@@ -104,7 +105,7 @@ calls and tracks label rename history. It keeps these items:
 - Fastmail mailbox to Gmail label mappings
 
 The cache contains no message bodies or credentials. The tool uses an atomic
-write. An `--apply` run with a cache also holds `<state_file>.lock` to stop
+write. A normal sync with a cache also holds `<state_file>.lock` to stop
 overlap.
 
 A missing, corrupt, invalid, or incomplete cache starts a full rebuild from
@@ -118,7 +119,7 @@ protects Gmail labels that the user created.
 Use `--no-cache` to rebuild on every run:
 
 ```sh
-go run ./cmd/jmapsync sync -config config.json --no-cache --apply
+go run ./cmd/jmapsync sync -config config.json --no-cache
 ```
 
 This mode creates no state, state lock, or temporary state file. It makes more
@@ -134,7 +135,7 @@ Use `flock` to prevent cacheless runs from overlapping. The wrapper's lock is
 separate from jmapsync and remains useful for cached runs:
 
 ```cron
-*/10 * * * * flock -n ~/.local/state/jmapsync/cron.lock /path/to/jmapsync sync -config /path/to/config.json --no-cache --apply
+*/10 * * * * flock -n ~/.local/state/jmapsync/cron.lock /path/to/jmapsync sync -config /path/to/config.json --no-cache
 ```
 
 Cached runs may omit `--no-cache`. Their state lock also blocks overlap.

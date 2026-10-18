@@ -70,7 +70,7 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	flags := flag.NewFlagSet("sync", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "config.json", "path to configuration JSON")
-	apply := flags.Bool("apply", false, "apply planned Gmail changes; cache them unless --no-cache")
+	dryRun := flags.Bool("dry-run", false, "preview changes without writing Gmail, cache, locks, or OAuth tokens")
 	full := flags.Bool("full", false, "scan all Fastmail mail instead of using the JMAP cursor")
 	noCache := flags.Bool("no-cache", false, "rebuild from servers; create no state or state-lock files")
 	flags.Usage = func() { printSyncUsage(stderr, flags) }
@@ -87,7 +87,8 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err := settings.ValidateForSync(); err != nil {
 		return err
 	}
-	stateStore, closeState, err := syncStateBackend(*noCache, *apply, settings.StateFile)
+	apply := !*dryRun
+	stateStore, closeState, err := syncStateBackend(*noCache, apply, settings.StateFile)
 	if err != nil {
 		return err
 	}
@@ -100,7 +101,7 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err != nil {
 		return err
 	}
-	httpClient, err := gmailapi.AuthenticatedClient(ctx, settings.Gmail.CredentialsFile, settings.Gmail.TokenFile, *apply)
+	httpClient, err := gmailapi.AuthenticatedClient(ctx, settings.Gmail.CredentialsFile, settings.Gmail.TokenFile, apply)
 	if err != nil {
 		return err
 	}
@@ -108,14 +109,14 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err != nil {
 		return err
 	}
-	if !*apply {
+	if *dryRun {
 		fmt.Fprintln(stdout, "DRY RUN: no Gmail, cache, lock, or OAuth-token writes")
 	}
 	engine := &syncer.Engine{
 		Source: source, Destination: destination,
 		Store: stateStore,
 		Options: syncer.Options{
-			Apply: *apply, Delete: settings.Delete, Full: *full,
+			Apply: apply, Delete: settings.Delete, Full: *full,
 			TrashLabel: settings.TrashLabel, SpamLabel: settings.SpamLabel,
 			RoleLabels: settings.RoleLabels, Output: stdout,
 		},
@@ -134,7 +135,7 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 
 const syncHelp = `Usage: jmapsync sync [options]
 
-Plans use zero persistent writes by default. Use --apply to change Gmail and update the optional cache.
+Sync applies Gmail changes and updates the optional cache by default. Use --dry-run to preview with zero persistent writes.
 Run this one-shot command from cron every 5-15 minutes. It has no daemon mode.
 --no-cache keeps state only in memory and creates no state or state lock. Prevent overlap with an external lock.
 Apply runs persist OAuth renewals under a separate token lock, including with --no-cache.
@@ -172,7 +173,7 @@ func printUsage(output io.Writer) {
 
 commands:
   google-auth  authorize the Gmail API and save a refresh token
-  sync         plan a mirror run; add --apply to change Gmail
+  sync         mirror Fastmail to Gmail; add --dry-run to preview
 
 run "jmapsync <command> -h" for command options`)
 }
