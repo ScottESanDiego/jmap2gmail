@@ -164,6 +164,7 @@ func TestLaterSourceBatchFailurePreservesCursor(t *testing.T) {
 func TestMissingIncrementalMetadataRetainsMapping(t *testing.T) {
 	base := &fakeSource{state: "s2", changes: []Changes{{NewState: "s2", Updated: []string{"gone"}}}}
 	state := store.New()
+	state.MailboxScope = mailboxScopeFingerprint(nil, true)
 	state.EmailState = "s1"
 	state.Messages["gone"] = store.Message{GmailID: "gmail-gone"}
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{"gmail-gone": {ID: "gmail-gone"}}}

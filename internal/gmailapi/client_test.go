@@ -1,6 +1,7 @@
 package gmailapi
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,7 +28,7 @@ func TestFindByMessageIDFetchesCandidateLabels(t *testing.T) {
 			}
 			body = `{"messages":[{"id":"g1","threadId":"t1"}]}`
 		case "/gmail/v1/users/me/messages/g1":
-			body = `{"id":"g1","labelIds":["INBOX","STARRED"]}`
+			body = `{"id":"g1","labelIds":["INBOX","STARRED"],"payload":{}}`
 		default:
 			return nil, fmt.Errorf("unexpected request: %s", request.URL)
 		}
@@ -88,10 +89,10 @@ func TestFindByMessageIDPaginatesAndPreservesEveryCandidate(t *testing.T) {
 			}
 		case "/gmail/v1/users/me/messages/g1":
 			gets++
-			body = `{"id":"g1","labelIds":["INBOX"]}`
+			body = `{"id":"g1","labelIds":["INBOX"],"payload":{}}`
 		case "/gmail/v1/users/me/messages/g2":
 			gets++
-			body = `{"id":"g2","labelIds":["TRASH"]}`
+			body = `{"id":"g2","labelIds":["TRASH"],"payload":{}}`
 		default:
 			return nil, fmt.Errorf("unexpected request: %s", request.URL)
 		}
@@ -119,18 +120,18 @@ func TestFindByMessageIDPaginatesAndPreservesEveryCandidate(t *testing.T) {
 	}
 }
 
-func TestManagedMessagesPaginatesAndFetchesIdentityMetadata(t *testing.T) {
+func TestInventoryPaginatesAndFetchesIdentityMetadata(t *testing.T) {
 	var lists, gets int
 	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		var body string
 		switch request.URL.Path {
 		case "/gmail/v1/users/me/messages":
 			lists++
-			if got := request.URL.Query()["labelIds"]; !reflect.DeepEqual(got, []string{"marker-id"}) {
-				t.Errorf("labelIds = %#v", got)
+			if request.URL.Query().Get("labelIds") != "" || request.URL.Query().Get("q") != "" {
+				t.Error("inventory must not filter messages")
 			}
 			if request.URL.Query().Get("includeSpamTrash") != "true" {
-				t.Error("managed list excluded spam and trash")
+				t.Error("inventory list excluded spam and trash")
 			}
 			if request.URL.Query().Get("pageToken") == "" {
 				body = `{"messages":[{"id":"g1"}],"nextPageToken":"next"}`
@@ -165,7 +166,7 @@ func TestManagedMessagesPaginatesAndFetchesIdentityMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	messages, err := (&Client{service: service, user: "me"}).ManagedMessages(t.Context(), "marker-id")
+	messages, err := (&Client{service: service, user: "me"}).Inventory(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,4 +246,203 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
+}
+
+func testGmailClient(t *testing.T, transport http.RoundTripper) *Client {
+	t.Helper()
+	service, err := gmail.NewService(t.Context(), option.WithEndpoint("https://gmail.test/"), option.WithHTTPClient(&http.Client{Transport: transport}), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Client{service: service, user: "me"}
+}
+
+func gmailResponse(r *http.Request, status int, body string) *http.Response {
+	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}
+}
+
+func TestInventoryIncludesSpamTrashAndUnmarkedMessages(t *testing.T) {
+	client := testGmailClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/gmail/v1/users/me/messages" {
+			q := r.URL.Query()
+			if q.Get("includeSpamTrash") != "true" || q.Get("q") != "" || q.Get("labelIds") != "" || q.Get("maxResults") != "500" {
+				t.Fatalf("inventory parameters=%v", q)
+			}
+			return gmailResponse(r, 200, `{"messages":[{"id":"spam"},{"id":"trash"},{"id":"unmarked"},{"id":"gone"}]}`), nil
+		}
+		switch r.URL.Path {
+		case "/gmail/v1/users/me/messages/spam":
+			return gmailResponse(r, 200, `{"id":"spam","labelIds":["SPAM"],"payload":{}}`), nil
+		case "/gmail/v1/users/me/messages/trash":
+			return gmailResponse(r, 200, `{"id":"trash","labelIds":["TRASH"],"payload":{}}`), nil
+		case "/gmail/v1/users/me/messages/unmarked":
+			return gmailResponse(r, 200, `{"id":"unmarked","payload":{"headers":[{"name":"Message-ID","value":"<id@example.com>"}]}}`), nil
+		case "/gmail/v1/users/me/messages/gone":
+			return gmailResponse(r, 404, `{"error":{"code":404,"message":"gone"}}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s", r.URL)
+		}
+	}))
+	messages, err := client.Inventory(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []syncer.Message{{ID: "spam", LabelIDs: []string{"SPAM"}}, {ID: "trash", LabelIDs: []string{"TRASH"}}, {ID: "unmarked", MessageIDHeaders: []string{"<id@example.com>"}}}
+	if !reflect.DeepEqual(messages, want) {
+		t.Fatalf("inventory=%#v want %#v", messages, want)
+	}
+}
+
+func TestInventoryAcceptsEmptyMailbox(t *testing.T) {
+	for _, body := range []string{`{}`, `{"messages":[]}`} {
+		t.Run(body, func(t *testing.T) {
+			client := testGmailClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) { return gmailResponse(r, 200, body), nil }))
+			if got, err := client.Inventory(t.Context()); err != nil || len(got) != 0 {
+				t.Fatalf("inventory=%v error=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestInventoryRejectsMalformedAndIncompleteResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name, list, metadata       string
+		listStatus, metadataStatus int
+		want                       string
+	}{
+		{name: "null list response", list: `null`, want: "null response"},
+		{name: "null listed message", list: `{"messages":[null]}`, want: "null message"},
+		{name: "missing listed ID", list: `{"messages":[{}]}`, want: "blank ID"},
+		{name: "blank listed ID", list: `{"messages":[{"id":" "}]}`, want: "blank ID"},
+		{name: "duplicate listed ID", list: `{"messages":[{"id":"g1"},{"id":"g1"}]}`, want: "duplicate ID"},
+		{name: "null metadata", list: `{"messages":[{"id":"g1"}]}`, metadata: `null`, want: "does not match"},
+		{name: "missing metadata ID", list: `{"messages":[{"id":"g1"}]}`, metadata: `{"payload":{}}`, want: "does not match"},
+		{name: "mismatched metadata ID", list: `{"messages":[{"id":"g1"}]}`, metadata: `{"id":"other","payload":{}}`, want: "does not match"},
+		{name: "missing payload", list: `{"messages":[{"id":"g1"}]}`, metadata: `{"id":"g1"}`, want: "missing payload"},
+		{name: "list failure", listStatus: 404, list: `{"error":{"code":404,"message":"bad list"}}`, want: "list Gmail messages"},
+		{name: "metadata forbidden", list: `{"messages":[{"id":"g1"}]}`, metadataStatus: 403, metadata: `{"error":{"code":403,"message":"forbidden"}}`, want: "metadata"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := testGmailClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/gmail/v1/users/me/messages" {
+					status := tc.listStatus
+					if status == 0 {
+						status = 200
+					}
+					return gmailResponse(r, status, tc.list), nil
+				}
+				body := tc.metadata
+				if body == "" {
+					body = `{"id":"g1","payload":{}}`
+				}
+				status := tc.metadataStatus
+				if status == 0 {
+					status = 200
+				}
+				return gmailResponse(r, status, body), nil
+			}))
+			if _, err := client.Inventory(t.Context()); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestInventoryRejectsPaginationCyclesAndDuplicateIDsAcrossPages(t *testing.T) {
+	for _, tc := range []struct{ name, pages string }{
+		{name: "cycle", pages: "cycle"},
+		{name: "duplicate", pages: "duplicate"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lists := 0
+			client := testGmailClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path != "/gmail/v1/users/me/messages" {
+					return gmailResponse(r, 200, `{"id":"g1","payload":{}}`), nil
+				}
+				lists++
+				if lists > 3 {
+					return nil, fmt.Errorf("unexpected fourth page")
+				}
+				if lists == 1 {
+					return gmailResponse(r, 200, `{"messages":[{"id":"g1"}],"nextPageToken":"next"}`), nil
+				}
+				if tc.pages == "duplicate" {
+					return gmailResponse(r, 200, `{"messages":[{"id":"g1"}]}`), nil
+				}
+				return gmailResponse(r, 200, `{"nextPageToken":"next"}`), nil
+			}))
+			_, err := client.Inventory(t.Context())
+			want := "page token"
+			if tc.pages == "duplicate" {
+				want = "duplicate ID"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) || lists != 2 {
+				t.Fatalf("lists=%d error=%v want %q", lists, err, want)
+			}
+		})
+	}
+}
+
+func TestChangesSinceIncludesMessageAddedOnEveryPage(t *testing.T) {
+	calls := 0
+	client := testGmailClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if !slices.Contains(r.URL.Query()["historyTypes"], "messageAdded") || !strings.Contains(r.URL.Query().Get("fields"), "messagesAdded(message(id))") {
+			t.Fatalf("history parameters omit additions: %v", r.URL.Query())
+		}
+		if calls == 1 {
+			return gmailResponse(r, 200, `{"history":[{"messagesAdded":[{"message":{"id":"new"}}]}],"nextPageToken":"next"}`), nil
+		}
+		if r.URL.Query().Get("pageToken") != "next" {
+			t.Fatal("history did not paginate")
+		}
+		return gmailResponse(r, 200, `{"history":[{"labelsAdded":[{"message":{"id":"changed"}},{"message":{"id":"new"}}]}]}`), nil
+	}))
+	got, err := client.ChangesSince(t.Context(), 10)
+	if err != nil || !reflect.DeepEqual(got, []string{"changed", "new"}) || calls != 2 {
+		t.Fatalf("IDs=%v calls=%d error=%v", got, calls, err)
+	}
+}
+
+func TestChangesSinceRejectsMalformedResponses(t *testing.T) {
+	for _, body := range []string{
+		`null`,
+		`{"history":[null]}`,
+		`{"history":[{"messagesAdded":[null]}]}`,
+		`{"history":[{"messagesAdded":[{}]}]}`,
+		`{"history":[{"messagesAdded":[{"message":{"id":""}}]}]}`,
+		`{"history":[{"labelsAdded":[null]}]}`,
+		`{"history":[{"labelsRemoved":[{}]}]}`,
+		`{"history":[{"messagesDeleted":[{"message":{}}]}]}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			client := testGmailClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) { return gmailResponse(r, 200, body), nil }))
+			if _, err := client.ChangesSince(t.Context(), 10); err == nil {
+				t.Fatal("malformed history accepted")
+			}
+		})
+	}
+}
+
+func TestChangesSinceRejectsPageTokenCycle(t *testing.T) {
+	calls := 0
+	client := testGmailClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls > 3 {
+			return nil, fmt.Errorf("unexpected fourth page")
+		}
+		return gmailResponse(r, 200, `{"nextPageToken":"next"}`), nil
+	}))
+	if _, err := client.ChangesSince(t.Context(), 10); err == nil || !strings.Contains(err.Error(), "page token") || calls != 2 {
+		t.Fatalf("calls=%d error=%v", calls, err)
+	}
+}
+
+func TestChangesSinceExpiredHistorySentinel(t *testing.T) {
+	client := testGmailClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return gmailResponse(r, 404, `{"error":{"code":404,"message":"expired history"}}`), nil
+	}))
+	if _, err := client.ChangesSince(t.Context(), 10); !errors.Is(err, syncer.ErrCannotCalculateDestinationChanges) {
+		t.Fatalf("error=%v want expired history sentinel", err)
+	}
 }

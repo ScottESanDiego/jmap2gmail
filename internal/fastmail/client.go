@@ -28,6 +28,20 @@ type Client struct {
 	account jmap.ID
 }
 
+// Keep total's presence: an omitted or null total must never be mistaken for
+// an authoritative empty inventory. The shallower field shadows the library's
+// numeric Total while retaining its other response fields.
+type queryResponse struct {
+	email.QueryResponse
+	Total *uint64 `json:"total"`
+}
+
+func init() {
+	// The imported email package has already registered its methods. Override
+	// only Email/query once during initialization, before concurrent requests.
+	jmap.RegisterMethod("Email/query", func() jmap.MethodResponse { return &queryResponse{} })
+}
+
 func New(token, sessionEndpoint string) (*Client, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -108,8 +122,32 @@ func (c *Client) State(ctx context.Context) (string, error) {
 }
 
 func (c *Client) AllEmailIDs(ctx context.Context) ([]string, error) {
+	return c.emailIDs(ctx, nil)
+}
+
+// EmailIDsInMailboxes queries the union of exactly these mailbox IDs. Empty
+// selections return no messages rather than accidentally querying all mail.
+func (c *Client) EmailIDsInMailboxes(ctx context.Context, ids []string) ([]string, error) {
+	conditions := make([]email.Filter, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			return nil, fmt.Errorf("cannot query an empty mailbox ID")
+		}
+		if !seen[id] {
+			conditions = append(conditions, &email.FilterCondition{InMailbox: jmap.ID(id)})
+			seen[id] = true
+		}
+	}
+	if len(conditions) == 0 {
+		return []string{}, nil
+	}
+	return c.emailIDs(ctx, &email.FilterOperator{Operator: jmap.OperatorOR, Conditions: conditions})
+}
+
+func (c *Client) emailIDs(ctx context.Context, filter email.Filter) ([]string, error) {
 	for attempt := 1; attempt <= 5; attempt++ {
-		result, stable, err := c.allEmailIDsAttempt(ctx)
+		result, stable, err := c.allEmailIDsAttempt(ctx, filter)
 		if err != nil {
 			return nil, err
 		}
@@ -120,33 +158,50 @@ func (c *Client) AllEmailIDs(ctx context.Context) ([]string, error) {
 	return nil, fmt.Errorf("Fastmail Email/query changed during 5 consecutive pagination attempts")
 }
 
-func (c *Client) allEmailIDsAttempt(ctx context.Context) ([]string, bool, error) {
+func (c *Client) allEmailIDsAttempt(ctx context.Context, filter email.Filter) ([]string, bool, error) {
 	var result []string
 	var queryState string
+	var total uint64
+	seen := make(map[jmap.ID]bool)
 	for position := int64(0); ; {
 		value, err := c.invoke(ctx, &email.Query{
 			Account: c.account, Position: position, Limit: defaultPageSize,
-			CalculateTotal: true,
+			CalculateTotal: true, Filter: filter,
 		})
 		if err != nil {
 			return nil, false, fmt.Errorf("Email/query at position %d: %w", position, err)
 		}
-		response, ok := value.(*email.QueryResponse)
+		response, ok := value.(*queryResponse)
 		if !ok {
 			return nil, false, fmt.Errorf("Email/query returned %T", value)
 		}
+		if response.Account != c.account || response.QueryState == "" || response.IDs == nil || response.Total == nil || response.Position != uint64(position) {
+			return nil, false, fmt.Errorf("Email/query returned incomplete or misplaced inventory")
+		}
 		if queryState == "" {
-			queryState = response.QueryState
+			queryState, total = response.QueryState, *response.Total
 		} else if response.QueryState != queryState {
 			return nil, false, nil
+		} else if *response.Total != total {
+			return nil, false, fmt.Errorf("Email/query total changed without queryState change")
 		}
 		for _, id := range response.IDs {
+			if id == "" || seen[id] {
+				return nil, false, fmt.Errorf("Email/query returned empty or duplicate ID")
+			}
 			result = append(result, string(id))
-		}
-		if len(response.IDs) == 0 || uint64(len(result)) >= response.Total {
-			return result, true, nil
+			seen[id] = true
 		}
 		position += int64(len(response.IDs))
+		if uint64(position) > total {
+			return nil, false, fmt.Errorf("Email/query returned more IDs than total")
+		}
+		if uint64(position) == total {
+			return result, true, nil
+		}
+		if len(response.IDs) == 0 {
+			return nil, false, fmt.Errorf("Email/query ended before total")
+		}
 	}
 }
 
@@ -157,6 +212,13 @@ func (c *Client) Emails(ctx context.Context, ids []string) ([]syncer.Email, erro
 		jmapIDs := make([]jmap.ID, 0, end-start)
 		for _, id := range ids[start:end] {
 			jmapIDs = append(jmapIDs, jmap.ID(id))
+		}
+		requested := make(map[jmap.ID]bool, len(jmapIDs))
+		for _, id := range jmapIDs {
+			if id == "" || requested[id] {
+				return nil, fmt.Errorf("Email/get requested empty or duplicate ID %q", id)
+			}
+			requested[id] = true
 		}
 		value, err := c.invoke(ctx, &email.Get{
 			Account: c.account,
@@ -172,7 +234,20 @@ func (c *Client) Emails(ctx context.Context, ids []string) ([]syncer.Email, erro
 		if !ok {
 			return nil, fmt.Errorf("Email/get returned %T", value)
 		}
+		if response.Account != c.account {
+			return nil, fmt.Errorf("Email/get returned wrong account")
+		}
+		for _, id := range response.NotFound {
+			if !requested[id] {
+				return nil, fmt.Errorf("Email/get returned unexpected or duplicate notFound ID %q", id)
+			}
+			delete(requested, id)
+		}
 		for _, item := range response.List {
+			if item == nil || !requested[item.ID] {
+				return nil, fmt.Errorf("Email/get returned unexpected, duplicate, or null email")
+			}
+			delete(requested, item.ID)
 			mailboxIDs := make(map[string]bool, len(item.MailboxIDs))
 			for id, present := range item.MailboxIDs {
 				mailboxIDs[string(id)] = present
@@ -184,6 +259,9 @@ func (c *Client) Emails(ctx context.Context, ids []string) ([]syncer.Email, erro
 				MailboxIDs: mailboxIDs, Keywords: keywords,
 				MessageIDs: append([]string(nil), item.MessageID...), Size: item.Size,
 			})
+		}
+		if len(requested) != 0 {
+			return nil, fmt.Errorf("Email/get did not account for %d requested IDs", len(requested))
 		}
 	}
 	return result, nil

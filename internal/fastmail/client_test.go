@@ -112,7 +112,7 @@ func TestAllEmailIDsAdvancesByReturnedPageSize(t *testing.T) {
 			if !strings.Contains(body, `"position":1`) {
 				return nil, fmt.Errorf("second page did not use returned count: %s", body)
 			}
-			payload = `{"methodResponses":[["Email/query",{"accountId":"account-1","queryState":"q1","ids":["email-2"],"total":2},"0"]],"sessionState":"session-1"}`
+			payload = `{"methodResponses":[["Email/query",{"accountId":"account-1","queryState":"q1","position":1,"ids":["email-2"],"total":2},"0"]],"sessionState":"session-1"}`
 		default:
 			return nil, fmt.Errorf("unexpected page %d", page)
 		}
@@ -158,4 +158,230 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
+}
+
+func TestEmailIDsInMailboxesFiltersEveryPageAndRetry(t *testing.T) {
+	calls := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body struct {
+			Calls [][]json.RawMessage `json:"methodCalls"`
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(data, &body); err != nil {
+			return nil, err
+		}
+		var args struct {
+			Position int64 `json:"position"`
+			Filter   struct {
+				Operator   string `json:"operator"`
+				Conditions []struct {
+					InMailbox string `json:"inMailbox"`
+				} `json:"conditions"`
+			} `json:"filter"`
+		}
+		if len(body.Calls) != 1 {
+			t.Fatalf("calls=%s", data)
+		}
+		if err := json.Unmarshal(body.Calls[0][1], &args); err != nil {
+			return nil, err
+		}
+		if args.Filter.Operator != "OR" || len(args.Filter.Conditions) != 2 || args.Filter.Conditions[0].InMailbox != "inbox" || args.Filter.Conditions[1].InMailbox != "projects" {
+			t.Fatalf("query lost filter: %s", data)
+		}
+		calls++
+		var state string
+		var ids []string
+		total := 2
+		switch calls {
+		case 1:
+			state = "q1"
+			ids = []string{"old"}
+			if args.Position != 0 {
+				t.Fatal("bad first position")
+			}
+		case 2:
+			state = "q2"
+			ids = []string{"changed"}
+			if args.Position != 1 {
+				t.Fatal("bad second position")
+			}
+		case 3:
+			state = "q3"
+			ids = []string{"a"}
+			if args.Position != 0 {
+				t.Fatal("retry did not restart")
+			}
+		case 4:
+			state = "q3"
+			ids = []string{"b"}
+			if args.Position != 1 {
+				t.Fatal("partial page did not advance")
+			}
+		default:
+			t.Fatalf("unexpected query %d", calls)
+		}
+		payload := fmt.Sprintf(`{"methodResponses":[["Email/query",{"accountId":"account-1","queryState":%q,"position":%d,"ids":%s,"total":%d},"0"]],"sessionState":"session-1"}`, state, args.Position, mustJSON(t, ids), total)
+		return response(200, "application/json", payload, r), nil
+	})
+	ids, err := testClient(transport).EmailIDsInMailboxes(t.Context(), []string{"inbox", "projects", "inbox"})
+	if err != nil || !reflect.DeepEqual(ids, []string{"a", "b"}) || calls != 4 {
+		t.Fatalf("IDs=%v calls=%d error=%v", ids, calls, err)
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestAllEmailIDsRemainsUnfiltered(t *testing.T) {
+	client := testClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		if strings.Contains(string(data), `"filter"`) {
+			t.Fatalf("all query includes filter: %s", data)
+		}
+		return response(200, "application/json", `{"methodResponses":[["Email/query",{"accountId":"account-1","queryState":"q1","ids":[],"total":0},"0"]],"sessionState":"session-1"}`, r), nil
+	}))
+	if _, err := client.AllEmailIDs(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEmailIDsInMailboxesEmptySelection(t *testing.T) {
+	client := testClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Fatal("empty selection queried server")
+		return nil, nil
+	}))
+	if ids, err := client.EmailIDsInMailboxes(t.Context(), nil); err != nil || len(ids) != 0 {
+		t.Fatalf("IDs=%v error=%v", ids, err)
+	}
+	if _, err := client.EmailIDsInMailboxes(t.Context(), []string{""}); err == nil {
+		t.Fatal("empty mailbox ID accepted")
+	}
+}
+
+func TestEmailsRequiresExactResponseAccounting(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		wantError    bool
+		want         int
+	}{
+		{"found", `"list":[{"id":"a","blobId":"b"}]`, false, 1},
+		{"not found", `"list":[],"notFound":["a"]`, false, 0},
+		{"missing", `"list":[]`, true, 0},
+		{"unknown", `"list":[{"id":"other"}]`, true, 0},
+		{"duplicate", `"list":[{"id":"a"},{"id":"a"}]`, true, 0},
+		{"both", `"list":[{"id":"a"}],"notFound":["a"]`, true, 0},
+		{"unknown not found", `"list":[],"notFound":["other"]`, true, 0},
+		{"duplicate not found", `"list":[],"notFound":["a","a"]`, true, 0},
+		{"null email", `"list":[null]`, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := testClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return response(200, "application/json", `{"methodResponses":[["Email/get",{"accountId":"account-1","state":"e1",`+tc.fields+`},"0"]],"sessionState":"session-1"}`, r), nil
+			}))
+			got, err := client.Emails(t.Context(), []string{"a"})
+			if (err != nil) != tc.wantError || (err == nil && len(got) != tc.want) {
+				t.Fatalf("emails=%v error=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestQueryRejectsIncompleteInventory(t *testing.T) {
+	for _, tc := range []struct{ name, fields string }{
+		{"missing state", `"ids":[],"total":0`},
+		{"missing IDs", `"queryState":"q","total":0`},
+		{"empty before total", `"queryState":"q","ids":[],"total":1`},
+		{"wrong position", `"queryState":"q","position":1,"ids":["a"],"total":1`},
+		{"duplicates", `"queryState":"q","ids":["a","a"],"total":2`},
+		{"empty ID", `"queryState":"q","ids":[""],"total":1`},
+		{"missing total", `"queryState":"q","ids":["a"]`},
+		{"too many", `"queryState":"q","ids":["a","b"],"total":1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := testClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return response(200, "application/json", `{"methodResponses":[["Email/query",{"accountId":"account-1",`+tc.fields+`},"0"]],"sessionState":"session-1"}`, r), nil
+			}))
+			if _, err := client.EmailIDsInMailboxes(t.Context(), []string{"inbox"}); err == nil {
+				t.Fatal("incomplete inventory accepted")
+			}
+		})
+	}
+}
+
+func TestQueryRejectsTotalChangeWithoutStateChange(t *testing.T) {
+	calls := 0
+	client := testClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		payload := `{"methodResponses":[["Email/query",{"accountId":"account-1","queryState":"q","ids":["a"],"total":2},"0"]],"sessionState":"session-1"}`
+		if calls == 2 {
+			payload = `{"methodResponses":[["Email/query",{"accountId":"account-1","queryState":"q","position":1,"ids":["b"],"total":3},"0"]],"sessionState":"session-1"}`
+		}
+		return response(200, "application/json", payload, r), nil
+	}))
+	if _, err := client.AllEmailIDs(t.Context()); err == nil {
+		t.Fatal("inconsistent total accepted")
+	}
+}
+
+func TestQueryRequiresExplicitTotal(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		wantError    bool
+	}{
+		{"missing empty", `"ids":[]`, true},
+		{"null empty", `"ids":[],"total":null`, true},
+		{"nonnumeric", `"ids":[],"total":"0"`, true},
+		{"negative", `"ids":[],"total":-1`, true},
+		{"explicit zero", `"ids":[],"total":0`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, scoped := range []bool{false, true} {
+				client := testClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return response(200, "application/json", `{"methodResponses":[["Email/query",{"accountId":"account-1","queryState":"q",`+tc.fields+`},"0"]],"sessionState":"session-1"}`, r), nil
+				}))
+				var ids []string
+				var err error
+				if scoped {
+					ids, err = client.EmailIDsInMailboxes(t.Context(), []string{"inbox"})
+				} else {
+					ids, err = client.AllEmailIDs(t.Context())
+				}
+				if (err != nil) != tc.wantError || (err == nil && len(ids) != 0) {
+					t.Fatalf("scoped=%v IDs=%v error=%v wantError=%v", scoped, ids, err, tc.wantError)
+				}
+			}
+		})
+	}
+}
+
+func TestQueryRequiresTotalOnLaterPages(t *testing.T) {
+	for _, field := range []string{"", `,"total":null`} {
+		t.Run(field, func(t *testing.T) {
+			calls := 0
+			client := testClient(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				body := `{"accountId":"account-1","queryState":"q","ids":["a"],"total":2}`
+				if calls == 2 {
+					body = `{"accountId":"account-1","queryState":"q","position":1,"ids":[]` + field + `}`
+				}
+				return response(200, "application/json", `{"methodResponses":[["Email/query",`+body+`,"0"]],"sessionState":"session-1"}`, r), nil
+			}))
+			if ids, err := client.AllEmailIDs(t.Context()); err == nil {
+				t.Fatalf("later page without total accepted IDs=%v", ids)
+			}
+		})
+	}
 }

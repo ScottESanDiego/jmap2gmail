@@ -20,14 +20,16 @@ type Config struct {
 }
 
 type Fastmail struct {
-	TokenFile       string `json:"token_file"`
-	SessionEndpoint string `json:"session_endpoint,omitempty"`
+	TokenFile        string   `json:"token_file"`
+	SessionEndpoint  string   `json:"session_endpoint,omitempty"`
+	IncludeMailboxes []string `json:"include_mailboxes,omitempty"`
 }
 
 type Gmail struct {
-	CredentialsFile string `json:"credentials_file"`
-	TokenFile       string `json:"token_file"`
-	User            string `json:"user,omitempty"`
+	CredentialsFile     string `json:"credentials_file"`
+	TokenFile           string `json:"token_file"`
+	User                string `json:"user,omitempty"`
+	QuotaUnitsPerMinute int    `json:"quota_units_per_minute,omitempty"`
 }
 
 func Load(path string) (Config, error) {
@@ -85,6 +87,9 @@ func (c Config) ValidateForAuth() error {
 }
 
 func (c Config) ValidateForSync() error {
+	if c.Gmail.QuotaUnitsPerMinute < 0 {
+		return errors.New("gmail.quota_units_per_minute must be zero or positive")
+	}
 	var missing []string
 	if c.Fastmail.TokenFile == "" {
 		missing = append(missing, "fastmail.token_file")

@@ -25,6 +25,7 @@ type State struct {
 	SourceAccount  string             `json:"source_account,omitempty"`
 	GmailAccount   string             `json:"gmail_account,omitempty"`
 	EmailState     string             `json:"email_state,omitempty"`
+	MailboxScope   string             `json:"mailbox_scope,omitempty"`
 	GmailHistoryID uint64             `json:"gmail_history_id,omitempty"`
 	Incomplete     bool               `json:"incomplete,omitempty"`
 	Messages       map[string]Message `json:"messages"`

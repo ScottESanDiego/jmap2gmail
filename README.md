@@ -3,19 +3,24 @@
 `jmapsync` mirrors Fastmail to Gmail. Fastmail remains the source of truth. The
 tool reads Fastmail through JMAP and inserts mail through the Gmail API.
 
+With `"delete": true`, it moves every non-spam Gmail message absent from the
+Fastmail source view to Trash, including mail it never inserted or marked.
+With `false`, it keeps those extra messages. Preview with `--dry-run`.
+
 It uses [`go-jmap`](https://sr.ht/~rockorager/go-jmap/) and Google's official Go
 clients.
 
 ## Behavior
 
 - Fastmail mailboxes become Gmail labels, including nested mailboxes.
-- `$seen` maps to `UNREAD`; `$flagged` maps to `STARRED`.
+- Messages without `$seen` get `UNREAD`; messages with `$seen` do not.
+  `$flagged` maps to `STARRED`.
 - Fastmail Trash maps to `Fastmail_Trash`.
 - Fastmail Junk maps to `Fastmail_Spam`.
-- Gmail-native `SPAM` is outside the mirror. The tool does not discover, adopt,
-  relabel, or trash those messages.
-- Source deletions move mapped Gmail messages to Trash when `"delete"` is
-  `true`. The tool never calls Gmail's permanent-delete API.
+- Gmail-native `SPAM` is outside the mirror. The tool does not adopt, relabel,
+  or trash those messages.
+- With `"delete": true`, Gmail messages absent from the source view move to
+  Trash, whether marked or unmarked. The tool never calls Gmail's permanent-delete API.
 
 Each inserted message gets one `X-Jmapsync-Account` header and one
 `X-Jmapsync-Email-ID` header. The tool strips source copies of both headers
@@ -25,16 +30,18 @@ before insertion. It also adds this per-account Gmail label:
 jmapsync-managed/<account-hash>
 ```
 
-The JMAP Email ID does not change when mail moves between Fastmail mailboxes.
-The headers and label let the tool rebuild its map after cache loss. Normal
-syncs restore the label if another client removes it.
+The JMAP Email ID stays the same when mail moves between Fastmail mailboxes.
+The headers and label let the tool rebuild its mapping after cache loss. Normal
+syncs restore the label if another client removes it. These markers recover
+message identity; they do not limit which Gmail messages can move to Trash.
 
-On the first run, the tool may adopt existing Gmail mail by RFC Message-ID. It
-adopts one clear match and adds the managed label. Gmail messages cannot
-gain new headers after insertion, so adopted mail keeps its original headers.
+On the first run, the tool may adopt existing Gmail mail by RFC Message-ID.
+Adoption requires one source message and one Gmail match. The tool adds the
+managed label. Gmail blocks header changes after insertion, so adopted mail
+keeps its original headers.
 
-During a rebuild, the tool checks all adoption candidates before it changes
-Gmail. It stops if a marked legacy message lacks a usable Message-ID. Shared
+During a rebuild, the tool inventories Gmail and checks adoption candidates
+before it changes Gmail. It stops if a marked legacy message lacks a usable Message-ID. Shared
 source Message-IDs, duplicate Gmail matches, and conflicting identities also
 stop the run with repair guidance.
 
@@ -55,9 +62,11 @@ Requires Go 1.27.2 or newer.
    go run ./cmd/jmapsync google-auth -config config.json
    ```
 
-   The tool requests `gmail.modify` and no broader scope. This scope can read
-   and change mail, manage labels, insert messages, and move messages to Trash.
-   It does not grant the API permission to delete messages at once.
+   The tool requests `gmail.modify` and no broader scope. It uses this scope to
+   read and change mail, manage labels, insert messages, and move messages to
+   Trash. The scope also permits sending mail; jmapsync does not send mail.
+   It does not allow permanent deletion that bypasses Trash.
+   See [Google's scope documentation](https://developers.google.com/workspace/gmail/api/auth/scopes).
 
    If an old token granted `mail.google.com`, revoke that grant. Then remove the
    token file and authorize again.
@@ -78,16 +87,111 @@ A dry run reads Fastmail, Gmail, the config, credentials, and any existing
 cache. It writes no Gmail data, cache, lock, temporary state, or OAuth token.
 The required credential and token files must already exist.
 
+## Select Fastmail folders
+
+Set `include_mailboxes` in the config's existing `fastmail` object to mirror
+selected folders:
+
+```json
+"include_mailboxes": ["Inbox", "Projects/Test"]
+```
+
+Use case-sensitive full Fastmail paths, before Gmail role-label mapping.
+Exact paths such as `Inbox` or `Inbox/Example` select only that folder.
+Add `/*` to select all descendants at any depth, excluding the parent itself.
+For example, `Mailing Lists/*` includes `Mailing Lists/Gentoo`,
+`Mailing Lists/Mailers`, and deeper folders. Add `Mailing Lists` separately to
+include the parent. `Inbox/Example/*` does not match `Inbox/Examples/Child`.
+
+Omit the field or use `[]` to mirror all mail. Only a trailing `/*` is supported;
+other `*` positions are invalid. Every selector must match at least one folder.
+Unknown or ambiguous paths and empty matches stop sync before persistent
+writes. Overlapping selectors count each folder once. A message in several
+selected folders gets one Gmail copy with those
+folder labels. Only selected folders contribute managed mailbox labels; other
+Gmail labels on included mail stay unchanged.
+
+The selection defines the source view for the whole Gmail mirror. With
+`"delete": true`, every non-spam Gmail message absent from that view moves to
+Trash. This includes unrelated Gmail mail and copies the tool never marked.
+Deleting source mail, moving it out of all selected folders, or narrowing the
+config can therefore move Gmail mail to Trash. With `false`, extra mail stays.
+
+For example, changing `["Inbox", "Projects/Test"]` to `["Inbox"]` makes every
+non-spam Gmail message without an Inbox source match eligible for Trash when
+deletion is enabled. Moving mail between selected folders updates its labels.
+
+The filter works with cached, full, incremental, cacheless, and dry runs. It
+reduces Fastmail scanning and local matching work. A first run still inventories
+all Gmail metadata, even for a small Fastmail folder. Changing the selection
+triggers a fresh inventory. Recovery uses the same account marker and identity
+headers, including with `--no-cache`. Native `SPAM` remains excluded. Gmail
+Trash is included: a matching copy returns from Trash when its source is in
+the selected view. Preview selection changes with `--dry-run`.
+
+### Debug folder selection
+
+Use `-verbose` or `--verbose` to diagnose folder selection:
+
+```sh
+./jmapsync sync --dry-run --verbose -config config.json
+```
+
+Diagnostics go to stderr; normal actions stay on stdout. They show config and
+state paths, mode flags, quoted selectors, sorted Fastmail folder paths, and
+the resolved selection. They contain no HTTP dumps, token values, credential
+contents, or message contents.
+
+A bare trailing slash does not select descendants. If
+`Inbox/Don Trust and Will/` is unknown, use `Inbox/Don Trust and Will` for the
+exact folder or `Inbox/Don Trust and Will/*` for all descendants, excluding the
+parent. The tool does not trim the slash or change the selector for you.
+
+## Rebuild progress
+
+The first run and later full rebuilds can take time before listing message
+actions. The tool inventories Fastmail, loads its message metadata, inventories
+Gmail metadata, and matches Message-IDs using a local index. Matching does not
+make a Gmail search request for each source message. The tool prints each
+phase and Fastmail metadata batch progress. Local matching progress shows
+completed counts and elapsed time. Gmail changes follow rebuild validation.
+
+Progress updates run between operations; a pending request can delay the next
+line. Each Gmail HTTP attempt has a 60-second timeout, in normal and dry runs.
+Quota pacing and retry waits fall outside this limit, so an operation can take
+longer.
+
+## Gmail quota pacing
+
+All Gmail reads and writes use weighted quota pacing, including dry runs.
+The default is 4,800 quota units per minute with a burst of 100 units. This
+leaves room below Google's published 6,000-unit per-user, per-project limit.
+Project quotas can differ; see [Google's quota documentation](https://developers.google.com/workspace/gmail/api/reference/quota).
+Set `gmail.quota_units_per_minute` to tune the rate. Omit it or use `0` for the
+default; negative values are invalid. The limit applies to each running process.
+
+When Gmail explicitly reports a minute quota limit, the tool waits and retries
+until the request succeeds or you cancel. Retry delays grow to 64 seconds; a
+later server retry hint takes precedence. Wait notices go to stderr. Other
+failures can end the run. An uncertain insert failure returns an error so the
+next run can recover message identity before inserting again.
+
+Inserts stream MIME through a short-lived temporary file with `0600`
+permissions so quota retries can replay the message. The tool removes the file
+when the insert returns, including on failure. It is separate from the cache;
+dry runs create no spool files.
+
 ## OAuth token renewal
 
 `google-auth` saves an access token, its expiry, and a refresh token. Sync checks
-credentials before starting reconciliation. Expired access tokens are renewed
-automatically, including during long runs.
+credentials before reconciling messages. It renews expired access tokens,
+including during long runs.
 
-Apply runs save renewed credentials immediately using an atomic replacement
-with `0600` permissions. A separate `<gmail.token_file>.lock` serializes token
-loading, renewal, and saving across processes, including `--no-cache` runs.
-Lock waits stop after five seconds; refresh requests time out after 30 seconds.
+Apply runs save each renewed token before using it, with an atomic replacement
+and `0600` permissions. A separate `<gmail.token_file>.lock` lets one process at
+a time load, renew, and save tokens. It also covers `--no-cache` runs.
+Lock waits stop after five seconds. Apply-run token refresh requests time out
+after 30 seconds.
 The token directory must be writable. Token locking protects credentials;
 cacheless syncs still need an external lock to prevent overlapping Gmail work.
 
@@ -96,21 +200,21 @@ If Google revokes or expires the refresh token, run `google-auth` again.
 
 ## Optional cache
 
-The default state file is optional for message sync. It saves JMAP and Gmail
-calls and tracks label rename history. It keeps these items:
+The state file is optional for message sync. It reduces JMAP and Gmail API
+calls and tracks label renames. It stores:
 
 - Fastmail and Gmail account identities
 - JMAP and Gmail History cursors
 - JMAP Email ID to Gmail message ID mappings and deletion marks
 - Fastmail mailbox to Gmail label mappings
 
-The cache contains no message bodies or credentials. The tool uses an atomic
-write. A normal sync with a cache also holds `<state_file>.lock` to stop
-overlap.
+The cache contains no message bodies or credentials. The tool writes it with
+an atomic replacement. A sync that applies changes with a cache also holds
+`<state_file>.lock` to stop overlap.
 
 A missing, corrupt, invalid, or incomplete cache starts a full rebuild from
-Fastmail and Gmail. A rebuild checks the managed headers and label before it
-changes Gmail.
+Fastmail and Gmail. A rebuild validates message identity and adoption matches
+against the Gmail inventory before changing Gmail.
 
 Without the cache, the tool cannot link a renamed Fastmail mailbox to its old
 Gmail label. It creates the new label and leaves the old one in place. This
@@ -123,16 +227,15 @@ go run ./cmd/jmapsync sync -config config.json --no-cache
 ```
 
 This mode creates no state, state lock, or temporary state file. It makes more
-API calls. It also needs an external lock because separate runs share no local
-state.
+API calls and needs an external lock to prevent overlapping syncs.
 
 ## Cron
 
 Run the tool once every 5–15 minutes. It is a one-shot command, not a daemon,
 and it keeps no persistent connection.
 
-Use `flock` to prevent cacheless runs from overlapping. The wrapper's lock is
-separate from jmapsync and remains useful for cached runs:
+Use `flock` to prevent cacheless runs from overlapping. This external lock also
+works for cached runs:
 
 ```cron
 */10 * * * * flock -n ~/.local/state/jmapsync/cron.lock /path/to/jmapsync sync -config /path/to/config.json --no-cache

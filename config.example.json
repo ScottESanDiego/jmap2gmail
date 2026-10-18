@@ -1,12 +1,14 @@
 {
   "fastmail": {
     "token_file": "~/.config/jmapsync/fastmail-token",
-    "session_endpoint": "https://api.fastmail.com/jmap/session"
+    "session_endpoint": "https://api.fastmail.com/jmap/session",
+    "include_mailboxes": []
   },
   "gmail": {
     "credentials_file": "~/.config/jmapsync/google-client.json",
     "token_file": "~/.config/jmapsync/google-token.json",
-    "user": "me"
+    "user": "me",
+    "quota_units_per_minute": 4800
   },
   "state_file": "~/.local/state/jmapsync/state.json",
   "delete": true,

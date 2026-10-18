@@ -13,6 +13,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"jmapsync/internal/store"
 )
@@ -23,14 +24,15 @@ type StateStore interface {
 }
 
 type Options struct {
-	Apply      bool
-	Delete     bool
-	Full       bool
-	TrashLabel string
-	SpamLabel  string
-	RoleLabels map[string]string
-	BatchSize  int
-	Output     io.Writer
+	IncludeMailboxes []string
+	Apply            bool
+	Delete           bool
+	Full             bool
+	TrashLabel       string
+	SpamLabel        string
+	RoleLabels       map[string]string
+	BatchSize        int
+	Output           io.Writer
 }
 
 type Result struct {
@@ -51,20 +53,32 @@ type Engine struct {
 	Store       StateStore
 	Options     Options
 
-	state        *store.State
-	mailboxNames map[string]string
-	labelIDs     map[string]string
-	labelNames   map[string]string
-	managedIDs   map[string]bool
-	managedLabel string
-	accountHash  string
-	labels       []Label
-	snapshot     map[string]Email
-	snapshotIDs  []string
-	snapshotAt   string
-	adoptions    map[string]bool
-	adoptionScan map[string][]Message
-	result       Result
+	selectedMailboxes map[string]bool
+	scopeChanged      bool
+	state             *store.State
+	mailboxNames      map[string]string
+	labelIDs          map[string]string
+	labelNames        map[string]string
+	managedIDs        map[string]bool
+	managedLabel      string
+	accountHash       string
+	labels            []Label
+	snapshot          map[string]Email
+	snapshotIDs       []string
+	snapshotAt        string
+	adoptions         map[string]bool
+	adoptionScan      map[string][]Message
+	result            Result
+	inventory         []Message
+	inventoryLoaded   bool
+	inventoryIndex    map[string][]Message
+	liveSourceIDs     map[string]bool
+	trashHandled      map[string]bool
+	spamHandled       map[string]bool
+	pendingChanges    *Changes
+	pendingSince      string
+	historyBaseline   uint64
+	now               func() time.Time
 }
 
 func (e *Engine) Run(ctx context.Context) (Result, error) {
@@ -72,9 +86,18 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 		return Result{}, errors.New("sync engine requires source, destination, and state store")
 	}
 	e.defaults()
+	e.liveSourceIDs = make(map[string]bool)
+	e.trashHandled = make(map[string]bool)
+	e.spamHandled = make(map[string]bool)
 	state, err := e.Store.Load()
 	if err != nil {
 		return Result{}, err
+	}
+	if !e.Options.Apply {
+		copyState := *state
+		copyState.Messages = maps.Clone(state.Messages)
+		copyState.Mailboxes = maps.Clone(state.Mailboxes)
+		state = &copyState
 	}
 	e.state = state
 	hadSourceCursor := state.EmailState != ""
@@ -86,12 +109,51 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if err := e.prepareMailboxScope(mailboxes); err != nil {
+		return Result{}, err
+	}
 	e.mailboxNames, err = MailboxLabelNamesWithRoles(mailboxes, e.Options.TrashLabel, e.Options.SpamLabel, e.Options.RoleLabels)
 	if err != nil {
 		return Result{}, err
 	}
-	if e.state.Rebuild {
-		e.log("state cache %s; rebuilding from Fastmail and Gmail", e.state.RebuildReason)
+	if e.selectedMailboxes != nil {
+		for id := range e.mailboxNames {
+			if !e.selectedMailboxes[id] {
+				delete(e.mailboxNames, id)
+			}
+		}
+	}
+	historyDestination, hasHistory := e.Destination.(DestinationHistory)
+	var historyBaseline uint64
+	if hasHistory {
+		historyBaseline, err = historyDestination.CurrentHistoryID(ctx)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+	e.historyBaseline = historyBaseline
+	needsFull := e.Options.Full || e.scopeChanged || e.state.Rebuild || e.state.EmailState == "" || !hasHistory
+	if !needsFull && hasHistory {
+		needsFull, err = e.destinationNeedsInventory(ctx, historyDestination)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+	if !needsFull {
+		changes, changeErr := e.Source.Changes(ctx, e.state.EmailState)
+		if errors.Is(changeErr, ErrCannotCalculateChanges) {
+			needsFull = true
+		} else if changeErr != nil {
+			return Result{}, changeErr
+		} else {
+			e.pendingChanges = &changes
+			e.pendingSince = e.state.EmailState
+		}
+	}
+	if needsFull {
+		if e.state.Rebuild {
+			e.log("state cache %s; rebuilding from Fastmail and Gmail", e.state.RebuildReason)
+		}
 		if err := e.preflightRebuild(ctx); err != nil {
 			return Result{}, err
 		}
@@ -102,22 +164,17 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 			return Result{}, err
 		}
 	}
-	if err := e.resolveLabels(ctx, mailboxes); err != nil {
+	if err := e.resolveLabels(ctx, e.selectedMailboxList(mailboxes)); err != nil {
 		return Result{}, err
 	}
-	if err := e.processTombstones(ctx); err != nil {
-		return Result{}, err
-	}
-	historyDestination, hasHistory := e.Destination.(DestinationHistory)
-	var historyBaseline uint64
-	if hasHistory {
-		historyBaseline, err = historyDestination.CurrentHistoryID(ctx)
-		if err != nil {
+	// A changed view first restores live mappings from its inventory. Processing
+	// old tombstones beforehand could discard a copy that is entering the view.
+	if !needsFull {
+		if err := e.processTombstones(ctx); err != nil {
 			return Result{}, err
 		}
 	}
-
-	if e.Options.Full || e.state.EmailState == "" {
+	if needsFull {
 		if err := e.full(ctx); err != nil {
 			return Result{}, err
 		}
@@ -126,6 +183,9 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 			return Result{}, err
 		}
 		e.log("Fastmail change history expired; planning a full reconciliation")
+		if err := e.preflightRebuild(ctx); err != nil {
+			return Result{}, err
+		}
 		if err := e.full(ctx); err != nil {
 			return Result{}, err
 		}
@@ -165,6 +225,9 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 }
 
 func (e *Engine) defaults() {
+	if e.now == nil {
+		e.now = time.Now
+	}
 	if e.Options.TrashLabel == "" {
 		e.Options.TrashLabel = "Fastmail_Trash"
 	}
@@ -216,6 +279,7 @@ func (e *Engine) preflightRebuild(ctx context.Context) error {
 	if err := e.loadSnapshot(ctx); err != nil {
 		return err
 	}
+	e.log("rebuild: inventorying Gmail metadata")
 	labels, err := e.Destination.Labels(ctx)
 	if err != nil {
 		return err
@@ -228,20 +292,49 @@ func (e *Engine) preflightRebuild(ctx context.Context) error {
 			break
 		}
 	}
-	if markerID == "" {
-		return e.preflightAdoptions(ctx, make(map[string]string))
-	}
-	messages, err := e.Destination.ManagedMessages(ctx, markerID)
+	messages, err := e.Destination.Inventory(ctx)
 	if err != nil {
 		return err
 	}
+	e.inventoryIndex = make(map[string][]Message)
+	seenInventory := make(map[string]bool, len(messages))
+	nonSpamInventory := make(map[string]bool, len(messages))
+	for _, message := range messages {
+		if message.ID == "" || seenInventory[message.ID] {
+			return errors.New("Gmail inventory has an empty or duplicate message ID")
+		}
+		seenInventory[message.ID] = true
+		if hasLabelID(message, LabelSpam) {
+			continue
+		}
+		nonSpamInventory[message.ID] = true
+		if len(message.MessageIDHeaders) == 1 {
+			id := firstMessageID(message.MessageIDHeaders)
+			if id != "" {
+				e.inventoryIndex[id] = append(e.inventoryIndex[id], message)
+			}
+		}
+	}
+	// A missing destination ID cannot reserve its source mapping during local
+	// adoption. Present copies, including Spam and Trash, keep their mappings.
+	for sourceID, record := range e.state.Messages {
+		if !seenInventory[record.GmailID] {
+			delete(e.state.Messages, sourceID)
+		}
+	}
+	e.inventory = messages
+	e.inventoryLoaded = true
 	slices.SortFunc(messages, func(a, b Message) int { return cmp.Compare(a.ID, b.ID) })
 	claimedGmail := make(map[string]string)
 	legacy := make(map[string][]Message)
 	for _, message := range messages {
 		if hasLabelID(message, LabelSpam) {
-			e.result.IgnoredSpam++
+			e.countIgnoredSpam(message.ID)
 			e.log("ignore marked Gmail spam message %q", message.ID)
+			continue
+		}
+		marked := markerID != "" && hasLabelID(message, markerID)
+		if !marked && (len(message.AccountHeaders) != 1 || strings.TrimSpace(message.AccountHeaders[0]) != e.accountHash) {
 			continue
 		}
 		hasAccount := message.AccountHeaders != nil
@@ -263,7 +356,7 @@ func (e *Engine) preflightRebuild(ctx context.Context) error {
 			return fmt.Errorf("managed Gmail message %q has invalid identity headers; remove its marker label or repair the headers", message.ID)
 		}
 		sourceID := strings.TrimSpace(message.EmailIDHeaders[0])
-		if prior := e.state.Messages[sourceID].GmailID; prior != "" && prior != message.ID {
+		if prior := e.state.Messages[sourceID].GmailID; prior != "" && prior != message.ID && nonSpamInventory[prior] {
 			return fmt.Errorf("Fastmail email %q has duplicate Gmail claims; remove the extra marker label", sourceID)
 		}
 		if priorSource := claimedGmail[message.ID]; priorSource != "" && priorSource != sourceID {
@@ -310,10 +403,17 @@ func (e *Engine) preflightAdoptions(ctx context.Context, claimedGmail map[string
 			byMessageID[effectiveMessageID(email)] = append(byMessageID[effectiveMessageID(email)], sourceID)
 		}
 	}
-	for _, messageID := range slices.Sorted(maps.Keys(byMessageID)) {
-		candidates, err := e.Destination.FindByMessageID(ctx, messageID)
-		if err != nil {
-			return err
+	messageIDs := slices.Sorted(maps.Keys(byMessageID))
+	e.log("rebuild: matching Gmail messages by Message-ID (0/%d messages)", len(messageIDs))
+	started := e.now()
+	lastReport := started
+	for index, messageID := range messageIDs {
+		candidates := e.inventoryIndex[messageID]
+		completed := index + 1
+		now := e.now()
+		if completed == 1 || completed%100 == 0 || now.Sub(lastReport) >= 5*time.Second || completed == len(messageIDs) {
+			e.log("rebuild: matched Gmail messages by Message-ID (%d/%d messages, elapsed %s)", completed, len(messageIDs), now.Sub(started).Truncate(time.Second))
+			lastReport = now
 		}
 		candidates = e.withoutSpamCandidates(candidates)
 		candidates = e.withoutIdentityCandidates(candidates)
@@ -334,15 +434,24 @@ func (e *Engine) preflightAdoptions(ctx context.Context, claimedGmail map[string
 			claimedGmail[candidates[0].ID] = sourceIDs[0]
 		}
 	}
+	if len(messageIDs) == 0 {
+		e.log("rebuild: matched Gmail messages by Message-ID (0/0 messages, elapsed %s)", e.now().Sub(started).Truncate(time.Second))
+	}
 	return nil
 }
 
 func (e *Engine) loadSnapshot(ctx context.Context) error {
+	e.log("rebuild: inventorying Fastmail messages")
 	baseline, err := e.Source.State(ctx)
 	if err != nil {
 		return err
 	}
-	ids, err := e.Source.AllEmailIDs(ctx)
+	var ids []string
+	if e.selectedMailboxes == nil {
+		ids, err = e.Source.AllEmailIDs(ctx)
+	} else {
+		ids, err = e.Source.(SourceMailboxQuery).EmailIDsInMailboxes(ctx, slices.Sorted(maps.Keys(e.selectedMailboxes)))
+	}
 	if err != nil {
 		return err
 	}
@@ -351,10 +460,12 @@ func (e *Engine) loadSnapshot(ctx context.Context) error {
 		return errors.New("Fastmail snapshot contains duplicate IDs; retry the sync")
 	}
 	snapshot := make(map[string]Email, len(ids))
-	if err := e.visitEmails(ctx, ids, func(email Email) error {
+	batchDone := func() { e.log("rebuild: loading Fastmail metadata (%d/%d messages)", len(snapshot), len(ids)) }
+	batchDone()
+	if err := e.visitEmailBatches(ctx, ids, func(email Email) error {
 		snapshot[email.ID] = email
 		return nil
-	}); err != nil {
+	}, batchDone); err != nil {
 		return err
 	}
 	for _, id := range ids {
@@ -390,7 +501,10 @@ func (e *Engine) resolveLabels(ctx context.Context, mailboxes []Mailbox) error {
 		e.labelNames[label.ID] = name
 	}
 	e.managedIDs = make(map[string]bool)
-	for _, saved := range e.state.Mailboxes {
+	for id, saved := range e.state.Mailboxes {
+		if e.selectedMailboxes != nil && !e.selectedMailboxes[id] {
+			continue
+		}
 		if saved.GmailLabelID != "" {
 			e.managedIDs[saved.GmailLabelID] = true
 		}
@@ -510,7 +624,10 @@ func (e *Engine) full(ctx context.Context) error {
 			return err
 		}
 	}
-	return e.incrementalFrom(ctx, baseline)
+	if err := e.incrementalFrom(ctx, baseline); err != nil {
+		return err
+	}
+	return e.cleanupExtras(ctx)
 }
 
 func (e *Engine) incremental(ctx context.Context) error {
@@ -519,7 +636,14 @@ func (e *Engine) incremental(ctx context.Context) error {
 
 func (e *Engine) incrementalFrom(ctx context.Context, since string) error {
 	for {
-		changes, err := e.Source.Changes(ctx, since)
+		var changes Changes
+		var err error
+		if e.pendingChanges != nil && since == e.pendingSince {
+			changes = *e.pendingChanges
+			e.pendingChanges = nil
+		} else {
+			changes, err = e.Source.Changes(ctx, since)
+		}
 		if err != nil {
 			return err
 		}
@@ -551,6 +675,11 @@ func (e *Engine) incrementalFrom(ctx context.Context, since string) error {
 }
 
 func (e *Engine) syncEmail(ctx context.Context, sourceEmail Email) error {
+	if !e.emailInScope(sourceEmail) {
+		return e.destroy(ctx, sourceEmail.ID)
+	}
+	e.liveSourceIDs[sourceEmail.ID] = true
+	sourceEmail = e.projectEmail(sourceEmail)
 	desiredNames, err := DesiredLabelNames(sourceEmail, e.mailboxNames)
 	if err != nil {
 		return err
@@ -568,7 +697,7 @@ func (e *Engine) syncEmail(ctx context.Context, sourceEmail Email) error {
 		message, err := e.Destination.Message(ctx, record.GmailID)
 		if err == nil {
 			if hasLabelID(message, LabelSpam) {
-				e.result.IgnoredSpam++
+				e.countIgnoredSpam(message.ID)
 				e.log("ignore Gmail spam message %q", message.ID)
 				return e.remember(sourceEmail, record.GmailID, desiredNames)
 			}
@@ -695,11 +824,13 @@ func (e *Engine) remember(sourceEmail Email, gmailID string, labels []string) er
 }
 
 func (e *Engine) destroy(ctx context.Context, sourceID string) error {
+	delete(e.liveSourceIDs, sourceID)
 	record, ok := e.state.Messages[sourceID]
-	if !ok {
+	if !ok || e.trashHandled[record.GmailID] {
 		return nil
 	}
 	if !e.Options.Delete {
+		e.trashHandled[record.GmailID] = true
 		e.result.SkippedTrash++
 		e.log("retain Gmail message %q because source deletion propagation is disabled", record.GmailID)
 		if e.Options.Apply {
@@ -718,10 +849,16 @@ func (e *Engine) destroy(ctx context.Context, sourceID string) error {
 		return err
 	}
 	if hasLabelID(message, LabelSpam) {
-		e.result.IgnoredSpam++
+		e.trashHandled[record.GmailID] = true
+		e.countIgnoredSpam(message.ID)
 		e.log("leave Gmail spam message %q unchanged for destroyed Fastmail email %q", record.GmailID, sourceID)
 		return e.forget(sourceID)
 	}
+	if hasLabelID(message, LabelTrash) {
+		e.trashHandled[record.GmailID] = true
+		return e.retainTombstone(sourceID, record)
+	}
+	e.trashHandled[record.GmailID] = true
 	e.result.Trashed++
 	e.log("trash Gmail message %q for destroyed Fastmail email %q", record.GmailID, sourceID)
 	if !e.Options.Apply {
@@ -730,7 +867,21 @@ func (e *Engine) destroy(ctx context.Context, sourceID string) error {
 	if err := e.Destination.Trash(ctx, record.GmailID); err != nil {
 		return err
 	}
+	if e.selectedMailboxes != nil {
+		return e.retainTombstone(sourceID, record)
+	}
 	return e.forget(sourceID)
+}
+
+// Keep filtered mappings so an email returning to the view restores its existing
+// Gmail copy. SourceDeleted also records retained mail when deletion is disabled.
+func (e *Engine) retainTombstone(sourceID string, record store.Message) error {
+	if !e.Options.Apply || record.SourceDeleted {
+		return nil
+	}
+	record.SourceDeleted = true
+	e.state.Messages[sourceID] = record
+	return e.Store.Save(e.state)
 }
 
 func (e *Engine) forget(sourceID string) error {
@@ -762,7 +913,7 @@ func (e *Engine) withoutSpamCandidates(candidates []Message) []Message {
 	result := make([]Message, 0, len(candidates))
 	for _, candidate := range candidates {
 		if hasLabelID(candidate, LabelSpam) {
-			e.result.IgnoredSpam++
+			e.countIgnoredSpam(candidate.ID)
 			e.log("ignore Gmail spam candidate %q", candidate.ID)
 			continue
 		}
@@ -788,20 +939,26 @@ func hasLabelID(message Message, labelID string) bool {
 }
 
 func (e *Engine) reconcileDestination(ctx context.Context, destination DestinationHistory, hadSourceCursor bool) error {
-	if e.state.GmailHistoryID == 0 {
-		if !hadSourceCursor {
-			return nil
-		}
-		e.log("Gmail history cursor is unavailable; reconcile all mapped messages")
-		return e.reconcileAllDestination(ctx)
+	since := e.state.GmailHistoryID
+	if e.inventoryLoaded {
+		since = e.historyBaseline
 	}
-	ids, err := destination.ChangesSince(ctx, e.state.GmailHistoryID)
-	if errors.Is(err, ErrCannotCalculateDestinationChanges) {
-		e.log("Gmail change history expired; reconcile all mapped messages")
-		return e.reconcileAllDestination(ctx)
-	}
-	if err != nil {
+	ids, err := destination.ChangesSince(ctx, since)
+	needsFull := errors.Is(err, ErrCannotCalculateDestinationChanges)
+	if err != nil && !needsFull {
 		return err
+	}
+	if !needsFull {
+		needsFull, err = e.unknownDestinationChanges(ctx, ids)
+		if err != nil {
+			return err
+		}
+	}
+	if needsFull {
+		if err := e.preflightRebuild(ctx); err != nil {
+			return err
+		}
+		return e.full(ctx)
 	}
 	return e.reconcileDestinationIDs(ctx, ids)
 }
@@ -828,9 +985,7 @@ func sortedMessageKeys(messages map[string]store.Message) []string {
 func (e *Engine) reconcileDestinationIDs(ctx context.Context, gmailIDs []string) error {
 	reverse := make(map[string]string, len(e.state.Messages))
 	for sourceID, record := range e.state.Messages {
-		if !record.SourceDeleted {
-			reverse[record.GmailID] = sourceID
-		}
+		reverse[record.GmailID] = sourceID
 	}
 	var sourceIDs []string
 	for _, gmailID := range sortedUniqueStrings(gmailIDs) {
@@ -842,18 +997,34 @@ func (e *Engine) reconcileDestinationIDs(ctx context.Context, gmailIDs []string)
 }
 
 func (e *Engine) reconcileSourceIDs(ctx context.Context, sourceIDs []string) error {
-	return e.visitEmails(ctx, sourceIDs, func(sourceEmail Email) error {
+	seen := make(map[string]bool)
+	if err := e.visitEmails(ctx, sourceIDs, func(sourceEmail Email) error {
+		seen[sourceEmail.ID] = true
 		if err := e.syncEmail(ctx, sourceEmail); err != nil {
 			return fmt.Errorf("reconcile Gmail change for Fastmail email %q: %w", sourceEmail.ID, err)
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	for _, id := range sortedUniqueStrings(sourceIDs) {
+		if !seen[id] {
+			if err := e.destroy(ctx, id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // visitEmails validates each complete response batch before visiting emails in
 // ID order. Missing emails are allowed because they may have been deleted since
 // the IDs were read; a full snapshot separately requires complete metadata.
 func (e *Engine) visitEmails(ctx context.Context, ids []string, visit func(Email) error) error {
+	return e.visitEmailBatches(ctx, ids, visit, nil)
+}
+
+func (e *Engine) visitEmailBatches(ctx context.Context, ids []string, visit func(Email) error, batchDone func()) error {
 	ids = sortedUniqueStrings(ids)
 	for batch := range slices.Chunk(ids, e.Options.BatchSize) {
 		emails, err := e.Source.Emails(ctx, batch)
@@ -879,6 +1050,9 @@ func (e *Engine) visitEmails(ctx context.Context, ids []string, visit func(Email
 			if err := visit(email); err != nil {
 				return err
 			}
+		}
+		if batchDone != nil {
+			batchDone()
 		}
 	}
 	return nil
@@ -988,4 +1162,11 @@ func sortedUniqueStrings(values []string) []string {
 	result := uniqueStrings(values)
 	slices.Sort(result)
 	return result
+}
+
+func (e *Engine) countIgnoredSpam(id string) {
+	if !e.spamHandled[id] {
+		e.spamHandled[id] = true
+		e.result.IgnoredSpam++
+	}
 }

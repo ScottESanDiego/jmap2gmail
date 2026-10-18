@@ -55,6 +55,12 @@ type Source interface {
 	Raw(context.Context, string) (io.ReadCloser, error)
 }
 
+// SourceMailboxQuery provides a server-side inventory restricted to mailboxes.
+// Email metadata and change events remain account-wide.
+type SourceMailboxQuery interface {
+	EmailIDsInMailboxes(context.Context, []string) ([]string, error)
+}
+
 type SourceIdentity interface {
 	SourceIdentity(context.Context) (string, error)
 }
@@ -81,7 +87,7 @@ type Destination interface {
 	CreateLabel(context.Context, string) (Label, error)
 	RenameLabel(context.Context, string, string) (Label, error)
 	FindByMessageID(context.Context, string) ([]Message, error)
-	ManagedMessages(context.Context, string) ([]Message, error)
+	Inventory(context.Context) ([]Message, error)
 	Message(context.Context, string) (Message, error)
 	Insert(context.Context, io.Reader, []string) (Message, error)
 	ModifyLabels(context.Context, string, []string, []string) (Message, error)

@@ -65,6 +65,64 @@ func expiredToken() *oauth2.Token {
 	return &oauth2.Token{AccessToken: "old", RefreshToken: "refresh-old", TokenType: "Bearer", Expiry: time.Now().Add(-time.Hour)}
 }
 
+func TestAuthenticatedClientRequestTimeout(t *testing.T) {
+	for _, persist := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persist=%t", persist), func(t *testing.T) {
+			credentials, path := oauthFixture(t, func(http.ResponseWriter, *http.Request) {
+				t.Error("valid token should not need renewal")
+			}, &oauth2.Token{AccessToken: "valid", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)})
+			client, err := AuthenticatedClient(t.Context(), credentials, path, persist)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if client.Timeout != 60*time.Second {
+				t.Fatalf("client timeout = %v, want 60s", client.Timeout)
+			}
+			for _, callerCancels := range []bool{false, true} {
+				t.Run(fmt.Sprintf("callerCancels=%t", callerCancels), func(t *testing.T) {
+					started := make(chan struct{})
+					target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.Header.Get("Authorization") != "Bearer valid" {
+							t.Error("request did not use OAuth transport")
+						}
+						close(started)
+						<-r.Context().Done()
+					}))
+					defer target.Close()
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					client.Timeout = 100 * time.Millisecond
+					if callerCancels {
+						client.Timeout = 2 * time.Second
+						go func() {
+							select {
+							case <-started:
+								cancel()
+							case <-ctx.Done():
+							}
+						}()
+					}
+					request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					response, err := client.Do(request)
+					if response != nil {
+						response.Body.Close()
+					}
+					want := context.DeadlineExceeded
+					if callerCancels {
+						want = context.Canceled
+					}
+					if !errors.Is(err, want) {
+						t.Fatalf("request error = %v, want %v", err, want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestRenewalPersistsAndSerializesClients(t *testing.T) {
 	var calls atomic.Int32
 	credentials, path := oauthFixture(t, func(w http.ResponseWriter, r *http.Request) {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/mail"
 	"os"
 	"path/filepath"
@@ -119,6 +120,43 @@ func (f *fakeDestination) FindByMessageID(_ context.Context, id string) ([]Messa
 	}
 	return append([]Message(nil), f.byMessageID[id]...), nil
 }
+func (f *fakeDestination) CurrentHistoryID(context.Context) (uint64, error)       { return 1, nil }
+func (f *fakeDestination) ChangesSince(context.Context, uint64) ([]string, error) { return nil, nil }
+func (f *fakeDestination) Inventory(context.Context) ([]Message, error) {
+	byID := make(map[string]Message)
+	maps.Copy(byID, f.messages)
+	add := func(messageID string, messages []Message) {
+		for _, message := range messages {
+			if len(message.MessageIDHeaders) == 0 {
+				message.MessageIDHeaders = []string{messageID}
+			}
+			if _, exists := byID[message.ID]; !exists {
+				byID[message.ID] = message
+			} else {
+				original := byID[message.ID]
+				if len(original.MessageIDHeaders) == 0 {
+					original.MessageIDHeaders = message.MessageIDHeaders
+					byID[message.ID] = original
+				}
+			}
+		}
+	}
+	for id, messages := range f.byMessageID {
+		add(id, messages)
+	}
+	for id, pages := range f.messageIDPages {
+		for _, messages := range pages {
+			add(id, messages)
+		}
+	}
+	var result []Message
+	for _, message := range byID {
+		result = append(result, message)
+	}
+	slices.SortFunc(result, func(a, b Message) int { return cmp.Compare(a.ID, b.ID) })
+	return result, nil
+}
+
 func (f *fakeDestination) ManagedMessages(_ context.Context, labelID string) ([]Message, error) {
 	var result []Message
 	for _, message := range f.messages {
@@ -215,6 +253,7 @@ func TestTrashFailurePreservesMappedMessageState(t *testing.T) {
 		trashErr: errors.New("Gmail rejected trash request"),
 	}
 	state := store.New()
+	state.MailboxScope = mailboxScopeFingerprint(nil, true)
 	state.EmailState = "s1"
 	state.Messages["e1"] = store.Message{GmailID: "g1"}
 	stateStore := &fakeStore{state: state}
@@ -242,7 +281,16 @@ type fakeStore struct {
 	saves int
 }
 
-func (f *fakeStore) Load() (*store.State, error) { return f.state, nil }
+func (f *fakeStore) Load() (*store.State, error) {
+	// Most engine fixtures represent an established incremental cache.
+	if f.state.EmailState != "" && f.state.GmailHistoryID == 0 {
+		f.state.GmailHistoryID = 1
+	}
+	if f.state.EmailState != "" && f.state.MailboxScope == "" {
+		f.state.MailboxScope = mailboxScopeFingerprint(nil, false)
+	}
+	return f.state, nil
+}
 func (f *fakeStore) Save(state *store.State) error {
 	f.state = state
 	f.saves++
@@ -337,7 +385,7 @@ func TestAdoptionReconcilesManagedLabels(t *testing.T) {
 	}
 }
 
-func TestFullSyncTrashesOnlyMappedMessages(t *testing.T) {
+func TestFullSyncTrashesAllNonSpamExtras(t *testing.T) {
 	source := &fakeSource{mailboxes: []Mailbox{{ID: "inbox", Name: "Inbox", Role: "inbox"}}, state: "s2", emails: map[string]Email{}}
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{"g-old": {ID: "g-old"}, "unrelated": {ID: "unrelated"}}}
 	state := store.New()
@@ -347,11 +395,11 @@ func TestFullSyncTrashesOnlyMappedMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Trashed != 1 || !reflect.DeepEqual(destination.trashed, []string{"g-old"}) {
+	if result.Trashed != 2 || !reflect.DeepEqual(destination.trashed, []string{"g-old", "unrelated"}) {
 		t.Fatalf("result = %#v, trashed = %#v", result, destination.trashed)
 	}
-	if _, ok := destination.messages["unrelated"]; !ok {
-		t.Fatal("unrelated Gmail message disappeared")
+	if !hasLabelID(destination.messages["unrelated"], LabelTrash) {
+		t.Fatal("unrelated Gmail extra not trashed")
 	}
 	if !hasLabelID(destination.messages["g-old"], LabelTrash) {
 		t.Fatal("mapped Gmail message was not moved to Trash")
@@ -455,6 +503,7 @@ func TestDestroyedNativeGmailSpamIsNotTrashed(t *testing.T) {
 		labels: standardLabels(), messages: map[string]Message{"g1": {ID: "g1", LabelIDs: []string{LabelSpam}}},
 	}
 	state := store.New()
+	state.MailboxScope = mailboxScopeFingerprint(nil, true)
 	state.EmailState = "s1"
 	state.Messages["e1"] = store.Message{GmailID: "g1"}
 	stateStore := &fakeStore{state: state}
@@ -473,7 +522,7 @@ func TestDestroyedNativeGmailSpamIsNotTrashed(t *testing.T) {
 	}
 }
 
-func TestAmbiguousMessageIDInsertsInsteadOfAdopting(t *testing.T) {
+func TestAmbiguousMessageIDFailsBeforeRebuildMutation(t *testing.T) {
 	source := &fakeSource{
 		mailboxes: []Mailbox{{ID: "inbox", Name: "Inbox", Role: "inbox"}},
 		state:     "s1", ids: []string{"e1"},
@@ -488,12 +537,12 @@ func TestAmbiguousMessageIDInsertsInsteadOfAdopting(t *testing.T) {
 		byMessageID: map[string][]Message{"m1@example.com": {{ID: "g1"}, {ID: "g2"}}},
 	}
 	stateStore := &fakeStore{state: store.New()}
-	result, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
-	if err != nil {
-		t.Fatal(err)
+	_, err := (&Engine{Source: source, Destination: destination, Store: stateStore, Options: Options{Apply: true}}).Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "adoption is ambiguous") {
+		t.Fatalf("error=%v", err)
 	}
-	if result.Adopted != 0 || result.Inserted != 1 || len(destination.inserted) != 1 {
-		t.Fatalf("result = %#v, inserted = %v", result, destination.inserted)
+	if stateStore.saves != 0 || len(destination.inserted)+len(destination.modified)+len(destination.created)+len(destination.trashed) != 0 {
+		t.Fatal("ambiguous rebuild mutated data")
 	}
 }
 
@@ -542,6 +591,7 @@ func TestIncrementalDryRunActionsAreSorted(t *testing.T) {
 		byMessageID: map[string][]Message{},
 	}
 	state := store.New()
+	state.MailboxScope = mailboxScopeFingerprint(nil, true)
 	state.EmailState = "s1"
 	state.Messages["a"] = store.Message{GmailID: "gmail-a"}
 	state.Messages["z"] = store.Message{GmailID: "gmail-z"}
@@ -1005,7 +1055,7 @@ func TestCorruptCacheIsNotOverwrittenWhenPreflightFails(t *testing.T) {
 	}
 }
 
-func TestRebuildTrashesValidatedOrphanOnly(t *testing.T) {
+func TestRebuildTrashesManagedAndUnmanagedExtras(t *testing.T) {
 	orphan := Message{
 		ID: "orphan", LabelIDs: []string{testManagedLabel()},
 		AccountHeaders: []string{testAccountHash()}, EmailIDHeaders: []string{"gone"},
@@ -1020,7 +1070,7 @@ func TestRebuildTrashesValidatedOrphanOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Trashed != 1 || !reflect.DeepEqual(destination.trashed, []string{"orphan"}) || !hasLabelID(destination.messages["spam"], LabelSpam) {
+	if result.Trashed != 2 || !reflect.DeepEqual(destination.trashed, []string{"orphan", "unrelated"}) || !hasLabelID(destination.messages["spam"], LabelSpam) {
 		t.Fatalf("result = %#v, trashed = %v, spam = %#v", result, destination.trashed, destination.messages["spam"])
 	}
 }
@@ -1092,7 +1142,7 @@ func TestDryRunReportsExactActionsWithoutMutation(t *testing.T) {
 		`adopt Gmail message "g1" for Fastmail email "e1"`,
 		`modify Gmail message "g1" labels (add=["INBOX" "UNREAD" "jmapsync-managed/`,
 		`trash Gmail message "gone" for destroyed Fastmail email "gone-source"`,
-		`ignore Gmail spam candidate "spam"`,
+		`ignore marked Gmail spam message "spam"`,
 		`leave Gmail and state unchanged`,
 	} {
 		if !strings.Contains(output.String(), want) {
