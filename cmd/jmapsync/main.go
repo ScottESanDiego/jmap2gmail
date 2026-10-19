@@ -73,7 +73,7 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	dryRun := flags.Bool("dry-run", false, "preview changes without Gmail, cache, lock, or OAuth token writes")
 	full := flags.Bool("full", false, "scan the full Fastmail view instead of using saved change history")
 	noCache := flags.Bool("no-cache", false, "rebuild from servers without a state cache or state lock")
-	verbose := flags.Bool("verbose", false, "show configuration and Fastmail folder selection diagnostics on stderr")
+	verbose := flags.Bool("verbose", false, "show actions, progress, retry waits, configuration, and folder diagnostics on stderr")
 	flags.Usage = func() { printSyncUsage(stderr, flags) }
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -88,9 +88,10 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	if err := settings.ValidateForSync(); err != nil {
 		return err
 	}
+	diagnostics := syncDiagnosticWriter(*verbose, stderr)
 	if *verbose {
-		fmt.Fprintf(stderr, "verbose: config=%q state=%q dry-run=%t full=%t no-cache=%t delete=%t\n", diagnosticPath(*configPath), diagnosticPath(settings.StateFile), *dryRun, *full, *noCache, settings.Delete)
-		fmt.Fprintf(stderr, "verbose: configured mailbox selectors: %q\n", settings.Fastmail.IncludeMailboxes)
+		fmt.Fprintf(diagnostics, "verbose: config=%q state=%q dry-run=%t full=%t no-cache=%t delete=%t\n", diagnosticPath(*configPath), diagnosticPath(settings.StateFile), *dryRun, *full, *noCache, settings.Delete)
+		fmt.Fprintf(diagnostics, "verbose: configured mailbox selectors: %q\n", settings.Fastmail.IncludeMailboxes)
 	}
 	apply := !*dryRun
 	authenticateSource := func() (*fastmail.Client, error) {
@@ -116,17 +117,17 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 			if err != nil {
 				return err
 			}
-			printMailboxDiagnostics(stderr, "available", paths, nil)
+			printMailboxDiagnostics(diagnostics, "available", paths, nil)
 		}
 		selected, err := syncer.ResolveMailboxIDs(mailboxes, settings.Fastmail.IncludeMailboxes)
 		if err != nil {
 			if *verbose {
-				printMailboxSelectorHints(stderr, settings.Fastmail.IncludeMailboxes)
+				printMailboxSelectorHints(diagnostics, settings.Fastmail.IncludeMailboxes)
 			}
 			return err
 		}
 		if *verbose {
-			printMailboxDiagnostics(stderr, "selected", paths, selected)
+			printMailboxDiagnostics(diagnostics, "selected", paths, selected)
 		}
 	}
 	stateStore, closeState, err := syncStateBackend(*noCache, apply, settings.StateFile)
@@ -145,34 +146,21 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return err
 	}
 	destination, err := gmailapi.New(ctx, httpClient, settings.Gmail.User, gmailapi.ClientOptions{
-		QuotaUnitsPerMinute: settings.Gmail.QuotaUnitsPerMinute,
-		Diagnostics:         stderr,
+		Diagnostics: diagnostics,
 	})
 	if err != nil {
 		return err
-	}
-	if *dryRun {
-		fmt.Fprintln(stdout, "DRY RUN: no Gmail, cache, lock, or OAuth-token writes")
 	}
 	engine := &syncer.Engine{
 		Source: source, Destination: destination,
 		Store: stateStore,
 		Options: syncer.Options{
 			Apply: apply, Delete: settings.Delete, Full: *full,
-			RoleLabels: settings.RoleLabels, Output: stdout,
+			RoleLabels: settings.RoleLabels, Output: diagnostics,
 			IncludeMailboxes: settings.Fastmail.IncludeMailboxes,
 		},
 	}
-	result, err := engine.Run(ctx)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout,
-		"summary: labels-created=%d labels-renamed=%d inserted=%d adopted=%d modified=%d trashed=%d trash-disabled=%d spam-ignored=%d unchanged=%d\n",
-		result.LabelsCreated, result.LabelsRenamed, result.Inserted, result.Adopted,
-		result.Modified, result.Trashed, result.SkippedTrash, result.IgnoredSpam, result.Unchanged,
-	)
-	return nil
+	return runSyncEngine(ctx, engine, stdout, *dryRun)
 }
 
 const syncHelp = `Usage: jmapsync sync [options]
@@ -211,15 +199,19 @@ Folder selection:
   Trash when delete is true, including mail this tool never inserted or marked.
   Other Gmail labels on included mail stay unchanged. Preview with --dry-run.
 
-Progress and timeouts:
-  First runs and full rebuilds scan mail before listing message actions.
+Output and timeouts:
+  Successful runs print one summary line on stdout; dry runs mark it DRY RUN.
+  Use --verbose for actions, progress, retry waits, config, and folders on stderr.
+  Errors always appear on stderr and exit nonzero.
+  First runs and full rebuilds scan mail before the summary appears.
   Initial scans read all Gmail metadata, even for a small Fastmail selection.
-  Rebuild phases, Fastmail metadata counts, and local matching counts show progress.
+  With --verbose, rebuild phases, Fastmail metadata counts, and local matching
+  counts show progress.
   Updates run between operations; a pending request can delay output.
   Each Gmail HTTP attempt times out after 60 seconds, excluding quota waits.
-  gmail.quota_units_per_minute defaults to 4800; all reads and writes are paced.
+  Requests proceed without proactive pacing.
   Explicit minute quota limits retry until success or cancellation.
-  Pacing and retry waits appear on stderr, including during dry runs.
+  With --verbose, quota retry waits appear on stderr, including during dry runs.
 
 go-jmap reads Fastmail. Official Google API and OAuth clients access Gmail.
 

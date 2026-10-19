@@ -29,7 +29,7 @@ func TestSyncHelpStatesOperationalContract(t *testing.T) {
 		"  -no-cache\n" +
 		"    \trebuild from servers without a state cache or state lock\n" +
 		"  -verbose\n" +
-		"    \tshow configuration and Fastmail folder selection diagnostics on stderr\n"
+		"    \tshow actions, progress, retry waits, configuration, and folder diagnostics on stderr\n"
 	if got := stderr.String(); got != want {
 		t.Fatalf("sync -h =\n%q\nwant\n%q", got, want)
 	}

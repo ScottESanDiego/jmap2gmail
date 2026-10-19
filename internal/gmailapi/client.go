@@ -36,10 +36,7 @@ func New(ctx context.Context, httpClient *http.Client, user string, options ...C
 	if len(options) == 1 {
 		settings = options[0]
 	}
-	policy, err := newRequestPolicy(settings)
-	if err != nil {
-		return nil, err
-	}
+	policy := newRequestPolicy(settings)
 	if user == "" {
 		user = "me"
 	}

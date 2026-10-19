@@ -7,8 +7,7 @@
   "gmail": {
     "credentials_file": "~/.config/jmapsync/google-client.json",
     "token_file": "~/.config/jmapsync/google-token.json",
-    "user": "me",
-    "quota_units_per_minute": 4800
+    "user": "me"
   },
   "state_file": "~/.local/state/jmapsync/state.json",
   "delete": true,

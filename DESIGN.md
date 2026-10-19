@@ -133,39 +133,57 @@ State saves follow each successful mutation. Cursors advance after all earlier
 work succeeds. A message without an RFC Message-ID gets a deterministic
 `@invalid` value during insertion.
 
+The initial full source pass reuses validated Gmail inventory metadata for
+existing mappings, adopted mail, and native Spam checks. This lookup exists
+only for that pass. The engine discards it before source-deletion handling,
+extra-message cleanup, and incremental catch-up. Those paths and ordinary
+incremental reads use fresh destination metadata. This adds no persistent
+state or cache format changes. Accounts can change during a run; the inventory
+does not provide an atomic view of both accounts.
+
 ## Rebuild progress
 
-Rebuilds print a phase before Fastmail inventory, metadata loading, Gmail
-metadata inventory, and local Message-ID matching. Fastmail metadata progress
-reports completed and total messages after each batch. Local matching reports
+With `--verbose`, rebuilds print phases on stderr before Fastmail inventory,
+metadata loading, Gmail metadata inventory, and local Message-ID matching.
+Fastmail metadata progress reports completed and total messages after each
+batch. Local matching reports
 completed counts and elapsed time after the first item, each 100 items, and the
 final item. It also reports after an item if five seconds have passed since the
 last update. Empty scans report zero completed work.
+
+With `--verbose`, full source reconciliation reports completed and total
+messages, unchanged messages within the pass, and elapsed time. It starts at
+zero, then reports after the first successful message, every 100 messages, and
+completion. It also
+reports after a successful message when five seconds have passed since the
+last update. Unchanged messages count as completed work. Failed messages do
+not advance the count.
 
 Reports run between operations, so pending requests can delay output. No
 background timer prints progress. Rebuild validation still precedes Gmail
 changes.
 
 The authenticated Gmail HTTP client has a 60-second timeout per HTTP attempt in
-normal and dry runs. Quota pacing and backoff waits fall outside that timeout.
+normal and dry runs. Quota backoff waits fall outside that timeout.
 This limit does not cover the initial OAuth token check, which runs before the
 client is created. Apply-run token refresh keeps its separate 30-second limit.
 
 ## Gmail request policy
 
-Every Gmail call uses weighted quota units for pacing, including reads and dry
-runs. `gmail.quota_units_per_minute` controls the per-process rate. Missing or
-zero selects 4,800 units per minute; negative values fail sync validation before
-startup writes. The limiter permits a burst of 100 units. This default leaves
-headroom under Google's published 6,000-unit per-user, per-project limit.
-Actual project quotas can differ. See
-[Google's quota documentation](https://developers.google.com/workspace/gmail/api/reference/quota).
+Gmail requests proceed without proactive pacing. The same policy applies to
+reads, writes, and dry runs.
 
 Explicit minute quota errors retry until success or context cancellation.
-Exponential backoff caps its delay at 64 seconds, unless the server requests a
-later retry. Pacing and retry waits report to stderr. The policy does not
-promise retries for every transient or server error. In particular, an
+Exponential backoff starts at one second with jitter and caps its delay at
+64 seconds, unless the server requests a later retry. With `--verbose`, retry
+waits report to stderr. The policy does not promise retries for every transient
+or server error. In particular, an
 ambiguous insert failure returns to the engine for next-run identity recovery.
+
+After actual quota retries succeed, verbose diagnostics report recovery with
+the API method, retry count, and elapsed time, without message IDs. Requests
+that fail, are canceled, or never encounter a quota limit emit no recovery
+notice. Default output remains the single summary line and any errors.
 
 Insertion streams MIME into a temporary `0600` file and replays it for quota
 retries. Each return path removes the spool, including cancellation and
@@ -175,8 +193,13 @@ insert. Dry runs never create it.
 ## Dry run
 
 `sync` applies Gmail changes and cache writes by default. `--dry-run` previews
-without persistent writes. A dry run lists each planned label create or rename,
-insert, adoption, label change, Trash move, and native-spam ignore.
+without persistent writes. Successful apply and dry runs print one summary line
+on stdout; dry runs use the prefix `DRY RUN summary:`. `-verbose` or `--verbose`
+enables config and folder diagnostics, per-message actions, rebuild progress,
+and quota retry waits on stderr. Verbose dry runs list each planned label create
+or rename, insert, adoption, label change, Trash move, and native-spam ignore.
+Errors, including timeout failures, always print on stderr and return a
+nonzero exit status, regardless of verbosity.
 
 A dry run mutates no Gmail or Fastmail data. It also writes no cache, state
 lock, temporary state, or OAuth token. It may read an existing cache and needs

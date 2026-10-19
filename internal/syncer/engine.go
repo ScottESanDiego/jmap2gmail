@@ -51,32 +51,34 @@ type Engine struct {
 	Store       StateStore
 	Options     Options
 
-	selectedMailboxes map[string]bool
-	scopeChanged      bool
-	state             *store.State
-	mailboxNames      map[string]string
-	labelIDs          map[string]string
-	labelNames        map[string]string
-	managedIDs        map[string]bool
-	managedLabel      string
-	accountHash       string
-	labels            []Label
-	snapshot          map[string]Email
-	snapshotIDs       []string
-	snapshotAt        string
-	adoptions         map[string]bool
-	adoptionScan      map[string][]Message
-	result            Result
-	inventory         []Message
-	inventoryLoaded   bool
-	inventoryIndex    map[string][]Message
-	liveSourceIDs     map[string]bool
-	trashHandled      map[string]bool
-	spamHandled       map[string]bool
-	pendingChanges    *Changes
-	pendingSince      string
-	historyBaseline   uint64
-	now               func() time.Time
+	selectedMailboxes  map[string]bool
+	scopeChanged       bool
+	state              *store.State
+	mailboxNames       map[string]string
+	labelIDs           map[string]string
+	labelNames         map[string]string
+	managedIDs         map[string]bool
+	managedLabel       string
+	accountHash        string
+	labels             []Label
+	snapshot           map[string]Email
+	snapshotIDs        []string
+	snapshotAt         string
+	adoptions          map[string]bool
+	adoptionScan       map[string][]Message
+	result             Result
+	inventory          []Message
+	inventoryLoaded    bool
+	inventoryValidated bool
+	reconcileInventory map[string]Message
+	inventoryIndex     map[string][]Message
+	liveSourceIDs      map[string]bool
+	trashHandled       map[string]bool
+	spamHandled        map[string]bool
+	pendingChanges     *Changes
+	pendingSince       string
+	historyBaseline    uint64
+	now                func() time.Time
 }
 
 func (e *Engine) Run(ctx context.Context) (Result, error) {
@@ -84,6 +86,9 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 		return Result{}, errors.New("sync engine requires source, destination, and state store")
 	}
 	e.defaults()
+	e.inventoryValidated = false
+	e.reconcileInventory = nil
+	defer func() { e.reconcileInventory = nil; e.inventoryValidated = false }()
 	e.liveSourceIDs = make(map[string]bool)
 	e.trashHandled = make(map[string]bool)
 	e.spamHandled = make(map[string]bool)
@@ -268,6 +273,8 @@ func (e *Engine) bindAccounts(ctx context.Context) error {
 }
 
 func (e *Engine) preflightRebuild(ctx context.Context) error {
+	e.inventoryValidated = false
+	e.reconcileInventory = nil
 	if err := e.loadSnapshot(ctx); err != nil {
 		return err
 	}
@@ -383,6 +390,7 @@ func (e *Engine) preflightRebuild(ctx context.Context) error {
 	if err := e.preflightAdoptions(ctx, claimedGmail); err != nil {
 		return err
 	}
+	e.inventoryValidated = true
 	return nil
 }
 
@@ -597,11 +605,8 @@ func (e *Engine) full(ctx context.Context) error {
 	for _, id := range ids {
 		seen[id] = true
 	}
-	for _, id := range ids {
-		sourceEmail := e.snapshot[id]
-		if err := e.syncEmail(ctx, sourceEmail); err != nil {
-			return fmt.Errorf("sync Fastmail email %q: %w", sourceEmail.ID, err)
-		}
+	if err := e.reconcileFullSnapshot(ctx, ids); err != nil {
+		return err
 	}
 	for _, sourceID := range sortedMessageKeys(e.state.Messages) {
 		if !seen[sourceID] {
@@ -620,6 +625,50 @@ func (e *Engine) full(ctx context.Context) error {
 		return err
 	}
 	return e.cleanupExtras(ctx)
+}
+
+// Reuse validated inventory only while reconciling the initial source snapshot.
+// Deletion checks and catch-up changes must observe fresh destination metadata.
+func (e *Engine) reconcileFullSnapshot(ctx context.Context, ids []string) error {
+	if e.inventoryValidated {
+		e.reconcileInventory = make(map[string]Message, len(e.inventory))
+		for _, message := range e.inventory {
+			message.LabelIDs = slices.Clone(message.LabelIDs)
+			message.AccountHeaders = slices.Clone(message.AccountHeaders)
+			message.EmailIDHeaders = slices.Clone(message.EmailIDHeaders)
+			message.MessageIDHeaders = slices.Clone(message.MessageIDHeaders)
+			e.reconcileInventory[message.ID] = message
+		}
+	}
+	e.inventoryValidated = false
+	defer func() { e.reconcileInventory = nil }()
+	completed := e.reconciliationProgress("full Fastmail snapshot", len(ids))
+	for _, id := range ids {
+		if err := e.syncEmail(ctx, e.snapshot[id]); err != nil {
+			return fmt.Errorf("sync Fastmail email %q: %w", id, err)
+		}
+		completed()
+	}
+	return nil
+}
+
+func (e *Engine) reconciliationProgress(phase string, total int) func() {
+	started := e.now()
+	lastReport := started
+	initialUnchanged := e.result.Unchanged
+	completed := 0
+	report := func(now time.Time) {
+		e.log("reconcile: %s (%d/%d messages, unchanged %d, elapsed %s)", phase, completed, total, e.result.Unchanged-initialUnchanged, now.Sub(started).Truncate(time.Second))
+		lastReport = now
+	}
+	report(started)
+	return func() {
+		completed++
+		now := e.now()
+		if completed == 1 || completed%100 == 0 || now.Sub(lastReport) >= 5*time.Second || completed == total {
+			report(now)
+		}
+	}
 }
 
 func (e *Engine) incremental(ctx context.Context) error {
@@ -686,7 +735,11 @@ func (e *Engine) syncEmail(ctx context.Context, sourceEmail Email) error {
 			e.log("adopt Gmail message %q for Fastmail email %q", record.GmailID, sourceEmail.ID)
 			delete(e.adoptions, sourceEmail.ID)
 		}
-		message, err := e.Destination.Message(ctx, record.GmailID)
+		message, reused := e.reconcileInventory[record.GmailID]
+		var err error
+		if !reused {
+			message, err = e.Destination.Message(ctx, record.GmailID)
+		}
 		if err == nil {
 			if hasLabelID(message, LabelSpam) {
 				e.countIgnoredSpam(message.ID)

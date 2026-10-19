@@ -8,19 +8,16 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"golang.org/x/time/rate"
 	"google.golang.org/api/googleapi"
 )
 
 func fakePolicy(t *testing.T) (*requestPolicy, *time.Time, *[]time.Duration) {
 	t.Helper()
-	p, err := newRequestPolicy(ClientOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := newRequestPolicy(ClientOptions{})
 	now := time.Unix(1700000000, 0)
 	var waits []time.Duration
 	p.now = func() time.Time { return now }
@@ -120,47 +117,8 @@ func TestQuotaRetriesBeyondFixedAttemptCaps(t *testing.T) {
 			t.Fatalf("wait %d=%v want %v", i, delay, want)
 		}
 	}
-	if !strings.Contains(output.String(), "rate limit; retrying messages.insert (25 units)") {
+	if !strings.Contains(output.String(), "rate limit; retrying messages.insert") {
 		t.Fatalf("quota diagnostics=%q", output.String())
-	}
-}
-
-func TestQuotaChargesEveryAttemptAndMethod(t *testing.T) {
-	for method, cost := range map[string]int{"labels.list": 1, "labels.create": 5, "labels.patch": 5, "getProfile": 1, "history.list": 2, "messages.list": 5, "messages.get": 20, "messages.insert": 25, "messages.modify": 5, "messages.trash": 20} {
-		t.Run(method, func(t *testing.T) {
-			p, now, _ := fakePolicy(t)
-			p.wait = func(ctx context.Context, delay time.Duration) error { return ctx.Err() }
-			calls := 0
-			_, err := execute(t.Context(), &Client{policy: p}, method, func() (int, error) {
-				calls++
-				if calls == 1 {
-					return 0, minuteQuota()
-				}
-				return 1, nil
-			})
-			if err != nil || calls != 2 || p.limiter.TokensAt(*now) != float64(100-2*cost) {
-				t.Fatalf("calls=%d tokens=%v error=%v", calls, p.limiter.TokensAt(*now), err)
-			}
-		})
-	}
-}
-
-func TestQuotaCancellationRestoresReservation(t *testing.T) {
-	p, now, _ := fakePolicy(t)
-	p.limiter = rate.NewLimiter(80, 100)
-	if !p.limiter.AllowN(*now, 100) {
-		t.Fatal("cannot exhaust initial burst")
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	p.wait = func(ctx context.Context, delay time.Duration) error { cancel(); return ctx.Err() }
-	calls := 0
-	_, err := execute(ctx, &Client{policy: p}, "messages.get", func() (int, error) { calls++; return 0, nil })
-	if !errors.Is(err, context.Canceled) || calls != 0 || p.limiter.TokensAt(*now) != 0 {
-		t.Fatalf("calls=%d tokens=%v error=%v", calls, p.limiter.TokensAt(*now), err)
-	}
-	p.wait = func(ctx context.Context, delay time.Duration) error { *now = now.Add(delay); return ctx.Err() }
-	if err := p.acquire(t.Context(), "messages.get", 20); err != nil || p.limiter.TokensAt(*now) != 0 {
-		t.Fatalf("reservation not reusable: tokens=%v error=%v", p.limiter.TokensAt(*now), err)
 	}
 }
 
@@ -175,22 +133,98 @@ func TestQuotaCancellationDuringBackoff(t *testing.T) {
 	}
 }
 
-func TestQuotaPacingAndLogThrottling(t *testing.T) {
-	p, now, waits := fakePolicy(t)
+func TestQuotaRecoveryReportsRetriesAndElapsed(t *testing.T) {
+	p, now, _ := fakePolicy(t)
 	var output bytes.Buffer
 	p.output = &output
-	c := &Client{policy: p}
-	for range 100 {
-		if _, err := execute(t.Context(), c, "messages.get", func() (int, error) { return 0, nil }); err != nil {
-			t.Fatal(err)
+	calls := 0
+	result, err := execute(t.Context(), &Client{policy: p}, "messages.get", func() (int, error) {
+		calls++
+		*now = now.Add(250 * time.Millisecond)
+		if calls <= 2 {
+			return 0, minuteQuota()
 		}
+		return 42, nil
+	})
+	want := "Gmail quota: rate limit; retrying messages.get, waiting 1s\n" +
+		"Gmail quota: rate limit; retrying messages.get, waiting 2s\n" +
+		"Gmail quota: recovered messages.get after 2 quota retries (elapsed 3.75s)\n"
+	if err != nil || result != 42 || calls != 3 || output.String() != want {
+		t.Fatalf("result=%d calls=%d error=%v diagnostics=%q, want %q", result, calls, err, output.String(), want)
 	}
-	if elapsed := now.Sub(time.Unix(1700000000, 0)); elapsed != 23750*time.Millisecond || len(*waits) != 95 {
-		t.Fatalf("elapsed=%v waits=%d", elapsed, len(*waits))
+}
+
+func TestQuotaFailuresNeverReportRecovery(t *testing.T) {
+	for _, failure := range []string{"permanent", "request cancellation", "backoff failure", "backoff cancellation", "before retry cancellation"} {
+		t.Run(failure, func(t *testing.T) {
+			p, _, _ := fakePolicy(t)
+			var output bytes.Buffer
+			p.output = &output
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			wantErr := io.ErrUnexpectedEOF
+			switch failure {
+			case "request cancellation":
+				wantErr = context.Canceled
+			case "backoff failure":
+				p.wait = func(context.Context, time.Duration) error { return wantErr }
+			case "backoff cancellation":
+				wantErr = context.Canceled
+				p.wait = func(context.Context, time.Duration) error { cancel(); return ctx.Err() }
+			case "before retry cancellation":
+				wantErr = context.Canceled
+				p.wait = func(context.Context, time.Duration) error { cancel(); return nil }
+			}
+			calls := 0
+			_, err := execute(ctx, &Client{policy: p}, "messages.get", func() (int, error) {
+				calls++
+				if calls == 1 {
+					return 0, minuteQuota()
+				}
+				if failure == "request cancellation" {
+					cancel()
+				}
+				return 0, wantErr
+			})
+			if !errors.Is(err, wantErr) || strings.Contains(output.String(), "recovered") {
+				t.Fatalf("error=%v diagnostics=%q", err, output.String())
+			}
+		})
 	}
-	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 5 || !strings.Contains(lines[0], "messages.get (20 units)") {
-		t.Fatalf("pacing logs=%q", output.String())
+}
+
+func TestConcurrentQuotaRecoveryDiagnostics(t *testing.T) {
+	var output bytes.Buffer
+	p := newRequestPolicy(ClientOptions{Diagnostics: &output})
+	p.jitter = func() time.Duration { return 0 }
+	p.wait = func(context.Context, time.Duration) error { return nil }
+	c := &Client{policy: p}
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Go(func() {
+			calls := 0
+			_, err := execute(t.Context(), c, "messages.get", func() (int, error) {
+				calls++
+				if calls == 1 {
+					return 0, minuteQuota()
+				}
+				return 1, nil
+			})
+			if err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	lines := strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n")
+	if len(lines) != 40 {
+		t.Fatalf("diagnostic lines=%d, want 40: %q", len(lines), output.String())
+	}
+	for _, line := range lines {
+		if line != "Gmail quota: rate limit; retrying messages.get, waiting 1s" &&
+			!(strings.HasPrefix(line, "Gmail quota: recovered messages.get after 1 quota retries (elapsed ") && strings.HasSuffix(line, ")")) {
+			t.Fatalf("interleaved or unexpected diagnostic: %q", line)
+		}
 	}
 }
 
@@ -215,5 +249,44 @@ func TestQuotaBackoffOutsideHTTPTimeout(t *testing.T) {
 	}
 	if calls != 2 || time.Since(started) < 30*time.Millisecond {
 		t.Fatalf("calls=%d elapsed=%v", calls, time.Since(started))
+	}
+}
+
+func TestSuccessfulRequestsNeverWait(t *testing.T) {
+	p, _, waits := fakePolicy(t)
+	var output bytes.Buffer
+	p.output = &output
+	client := &Client{policy: p}
+	calls := 0
+	for range 1000 {
+		if _, err := execute(t.Context(), client, "messages.get", func() (int, error) { calls++; return 1, nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1000 || len(*waits) != 0 || output.Len() != 0 {
+		t.Fatalf("calls=%d waits=%d diagnostics=%q", calls, len(*waits), output.String())
+	}
+}
+
+func TestQuotaExecutorChecksCancellationBeforeEveryAttempt(t *testing.T) {
+	for _, precanceled := range []bool{true, false} {
+		t.Run(fmt.Sprint(precanceled), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			p, _, _ := fakePolicy(t)
+			p.wait = func(context.Context, time.Duration) error { cancel(); return nil }
+			if precanceled {
+				cancel()
+			}
+			calls := 0
+			_, err := execute(ctx, &Client{policy: p}, "messages.get", func() (int, error) { calls++; return 0, minuteQuota() })
+			want := 1
+			if precanceled {
+				want = 0
+			}
+			if calls != want || !errors.Is(err, context.Canceled) {
+				t.Fatalf("calls=%d want=%d error=%v", calls, want, err)
+			}
+		})
 	}
 }

@@ -79,9 +79,11 @@ Requires Go 1.27.2 or newer.
    ```
 
 `sync` applies changes by default. Pass `--dry-run` to preview without writes.
-A dry run lists planned label creation, renames, inserts, adoptions, label
-changes, Trash moves, and ignored native spam. It also reports that Gmail and
-state stay unchanged.
+Successful apply and dry runs write one summary line to stdout. Dry-run
+summaries start with `DRY RUN summary:`. Add `--verbose` to see planned label
+creation, renames, inserts, adoptions, label changes, Trash moves, and ignored
+native spam on stderr. Errors, including timeout failures, always go to stderr
+and return a nonzero exit status.
 
 A dry run reads Fastmail, Gmail, the config, credentials, and any existing
 cache. It writes no Gmail data, cache, lock, temporary state, or OAuth token.
@@ -159,10 +161,11 @@ Use `-verbose` or `--verbose` to diagnose folder selection:
 ./jmapsync sync --dry-run --verbose -config config.json
 ```
 
-Diagnostics go to stderr; normal actions stay on stdout. They show config and
-state paths, mode flags, quoted selectors, sorted Fastmail folder paths, and
-the resolved selection. They contain no HTTP dumps, token values, credential
-contents, or message contents.
+Verbose details go to stderr; stdout still contains only the summary. Details
+include config and state paths, mode flags, quoted selectors, sorted Fastmail
+folder paths, the resolved selection, message actions, reconciliation progress,
+and quota retry waits and recoveries. They contain no HTTP dumps, token values,
+credential contents, or message contents.
 
 A bare trailing slash does not select descendants. If
 `Inbox/Don Trust and Will/` is unknown, use `Inbox/Don Trust and Will` for the
@@ -171,32 +174,38 @@ parent. The tool does not trim the slash or change the selector for you.
 
 ## Rebuild progress
 
-The first run and later full rebuilds can take time before listing message
-actions. The tool inventories Fastmail, loads its message metadata, inventories
+The first run and later full rebuilds can take time before the summary appears.
+The tool inventories Fastmail, loads its message metadata, inventories
 Gmail metadata, and matches Message-IDs using a local index. Matching does not
-make a Gmail search request for each source message. The tool prints each
-phase and Fastmail metadata batch progress. Local matching progress shows
-completed counts and elapsed time. Gmail changes follow rebuild validation.
+make a Gmail search request for each source message. With `--verbose`, stderr
+shows each phase and Fastmail metadata batch progress. Local matching progress
+shows completed counts and elapsed time. Gmail changes follow rebuild
+validation.
+
+With `--verbose`, full reconciliation also reports completed and total
+messages, unchanged messages, and elapsed time. This progress starts at zero and
+continues even when no Gmail changes are needed. Full runs reuse the validated
+Gmail inventory during the initial message pass, reducing repeated reads.
+Deletion checks and later changes still read current Gmail state.
 
 Progress updates run between operations; a pending request can delay the next
 line. Each Gmail HTTP attempt has a 60-second timeout, in normal and dry runs.
-Quota pacing and retry waits fall outside this limit, so an operation can take
-longer.
+Quota retry waits fall outside this limit, so an operation can take longer.
 
-## Gmail quota pacing
+## Gmail quota retries
 
-All Gmail reads and writes use weighted quota pacing, including dry runs.
-The default is 4,800 quota units per minute with a burst of 100 units. This
-leaves room below Google's published 6,000-unit per-user, per-project limit.
-Project quotas can differ; see [Google's quota documentation](https://developers.google.com/workspace/gmail/api/reference/quota).
-Set `gmail.quota_units_per_minute` to tune the rate. Omit it or use `0` for the
-default; negative values are invalid. The limit applies to each running process.
+Gmail requests proceed without proactive pacing, including during dry runs.
 
 When Gmail explicitly reports a minute quota limit, the tool waits and retries
-until the request succeeds or you cancel. Retry delays grow to 64 seconds; a
-later server retry hint takes precedence. Wait notices go to stderr. Other
+until the request succeeds or you cancel. Retry delays start at one second and
+grow exponentially with jitter, capped at 64 seconds. A later server retry hint
+takes precedence. With `--verbose`, wait notices go to stderr. Other
 failures can end the run. An uncertain insert failure returns an error so the
 next run can recover message identity before inserting again.
+
+After a quota-limited request succeeds, `--verbose` reports the API method,
+retry count, and elapsed time on stderr, without message IDs. Failed or canceled
+requests do not report recovery.
 
 Inserts stream MIME through a short-lived temporary file with `0600`
 permissions so quota retries can replay the message. The tool removes the file
@@ -254,7 +263,8 @@ API calls and needs an external lock to prevent overlapping syncs.
 ## Cron
 
 Run the tool once every 5–15 minutes. It is a one-shot command, not a daemon,
-and it keeps no persistent connection.
+and it keeps no persistent connection. Default output is one summary line;
+add `--verbose` for details on stderr.
 
 Use `flock` to prevent cacheless runs from overlapping. This external lock also
 works for cached runs:

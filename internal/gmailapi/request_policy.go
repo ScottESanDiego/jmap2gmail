@@ -12,46 +12,31 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/time/rate"
 	"google.golang.org/api/googleapi"
 )
 
-const DefaultQuotaUnitsPerMinute = 4800
-
-// ClientOptions controls the shared quota budget for this Gmail client.
+// ClientOptions controls diagnostics for Gmail quota retries.
 type ClientOptions struct {
-	QuotaUnitsPerMinute int
-	Diagnostics         io.Writer
+	Diagnostics io.Writer
 }
 
 type requestPolicy struct {
-	limiter *rate.Limiter
-	now     func() time.Time
-	wait    func(context.Context, time.Duration) error
-	jitter  func() time.Duration
-	output  io.Writer
-	logMu   sync.Mutex
-	lastLog time.Time
-	logged  bool
+	now    func() time.Time
+	wait   func(context.Context, time.Duration) error
+	jitter func() time.Duration
+	output io.Writer
+	logMu  sync.Mutex
 }
 
-func newRequestPolicy(options ClientOptions) (*requestPolicy, error) {
-	units := options.QuotaUnitsPerMinute
-	if units < 0 {
-		return nil, fmt.Errorf("Gmail quota units per minute must not be negative")
-	}
-	if units == 0 {
-		units = DefaultQuotaUnitsPerMinute
-	}
+func newRequestPolicy(options ClientOptions) *requestPolicy {
 	output := options.Diagnostics
 	if output == nil {
 		output = io.Discard
 	}
 	return &requestPolicy{
-		limiter: rate.NewLimiter(rate.Limit(float64(units)/60), 100),
-		now:     time.Now, wait: waitContext,
+		now: time.Now, wait: waitContext,
 		jitter: func() time.Duration { return rand.N(time.Second) }, output: output,
-	}, nil
+	}
 }
 
 func waitContext(ctx context.Context, delay time.Duration) error {
@@ -65,92 +50,50 @@ func waitContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// Costs follow Gmail's current quota table. Both metadata and minimal gets
-// cost 20; labels.patch is budgeted as a label update (5 units).
-// Verified 2026-10-18: https://developers.google.com/workspace/gmail/api/reference/quota
-func methodCost(method string) (int, error) {
-	switch method {
-	case "labels.list", "getProfile":
-		return 1, nil
-	case "history.list":
-		return 2, nil
-	case "labels.create", "labels.patch", "messages.list", "messages.modify":
-		return 5, nil
-	case "messages.get", "messages.trash":
-		return 20, nil
-	case "messages.insert":
-		return 25, nil
-	default:
-		return 0, fmt.Errorf("unknown Gmail quota method %q", method)
-	}
-}
-
-func (p *requestPolicy) logWait(method string, cost int, delay time.Duration, retry bool) {
+func (p *requestPolicy) logWait(method string, delay time.Duration) {
 	p.logMu.Lock()
 	defer p.logMu.Unlock()
-	now := p.now()
-	if !retry && p.logged && now.Sub(p.lastLog) < 5*time.Second {
-		return
-	}
-	if !retry {
-		p.lastLog, p.logged = now, true
-	}
-	reason := "pacing"
-	if retry {
-		reason = "rate limit; retrying"
-	}
-	fmt.Fprintf(p.output, "Gmail quota: %s %s (%d units), waiting %s\n", reason, method, cost, delay.Round(time.Millisecond))
+	fmt.Fprintf(p.output, "Gmail quota: rate limit; retrying %s, waiting %s\n", method, delay.Round(time.Millisecond))
 }
 
-func (p *requestPolicy) acquire(ctx context.Context, method string, cost int) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	reservation := p.limiter.ReserveN(p.now(), cost)
-	if !reservation.OK() {
-		return fmt.Errorf("Gmail quota cost %d exceeds limiter burst", cost)
-	}
-	delay := reservation.DelayFrom(p.now())
-	if delay > 0 {
-		p.logWait(method, cost, delay, false)
-		if err := p.wait(ctx, delay); err != nil {
-			reservation.CancelAt(p.now())
-			return err
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		reservation.CancelAt(p.now())
-		return err
-	}
-	return nil
+func (p *requestPolicy) logRecovery(method string, retries int, elapsed time.Duration) {
+	p.logMu.Lock()
+	defer p.logMu.Unlock()
+	fmt.Fprintf(p.output, "Gmail quota: recovered %s after %d quota retries (elapsed %s)\n", method, retries, elapsed.Round(time.Millisecond))
 }
 
-// execute surrounds a single fresh SDK call. Waiting happens before Do, outside
-// the HTTP client's per-attempt timeout. Only explicit quota rejections replay.
+// execute surrounds a single fresh SDK call. Only explicit quota rejections
+// delay and replay; waiting stays outside the HTTP client's attempt timeout.
 func execute[T any](ctx context.Context, c *Client, method string, attempt func() (T, error)) (T, error) {
 	var zero T
-	cost, err := methodCost(method)
-	if err != nil {
-		return zero, err
-	}
 	c.policyOnce.Do(func() {
 		if c.policy == nil {
-			c.policy, _ = newRequestPolicy(ClientOptions{})
+			c.policy = newRequestPolicy(ClientOptions{})
 		}
 	})
 	p := c.policy
+	started := p.now()
+	retries := 0
+	hadQuota := false
 	backoff := time.Second
 	for {
-		if err := p.acquire(ctx, method, cost); err != nil {
-			return zero, fmt.Errorf("wait for Gmail quota: %w", err)
+		if err := ctx.Err(); err != nil {
+			return zero, err
+		}
+		if hadQuota {
+			retries++
 		}
 		result, err := attempt()
 		if !isMinuteQuotaError(err) {
+			if err == nil && hadQuota {
+				p.logRecovery(method, retries, p.now().Sub(started))
+			}
 			return result, err
 		}
+		hadQuota = true
 		delay := min(backoff+p.jitter(), 64*time.Second)
 		delay = max(delay, serverRetryDelay(err, p.now()))
-		p.logWait(method, cost, delay, true)
+		p.logWait(method, delay)
 		if err := p.wait(ctx, delay); err != nil {
 			return zero, fmt.Errorf("wait to retry Gmail quota: %w", err)
 		}

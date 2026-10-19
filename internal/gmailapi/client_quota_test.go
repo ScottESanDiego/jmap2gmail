@@ -30,45 +30,53 @@ func assertEmptySpoolDirectory(t *testing.T, dir string) {
 	}
 }
 
-func TestEveryGmailMethodUsesQuotaExecutor(t *testing.T) {
+func TestEveryGmailMethodRetriesExplicitQuotaRejections(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TMPDIR", dir)
 	for _, tc := range []struct {
-		name string
-		cost int
-		call func(*Client) error
+		name       string
+		rejections int
+		call       func(*Client) error
 	}{
 		{"labels list", 1, func(c *Client) error { _, e := c.Labels(t.Context()); return e }},
-		{"labels create", 5, func(c *Client) error { _, e := c.CreateLabel(t.Context(), "name"); return e }},
-		{"labels patch", 5, func(c *Client) error { _, e := c.RenameLabel(t.Context(), "l", "name"); return e }},
-		{"message search and metadata", 25, func(c *Client) error { _, e := c.FindByMessageID(t.Context(), "id@example.com"); return e }},
-		{"inventory and metadata", 25, func(c *Client) error { _, e := c.Inventory(t.Context()); return e }},
-		{"message minimal", 20, func(c *Client) error { _, e := c.Message(t.Context(), "g1"); return e }},
-		{"insert", 25, func(c *Client) error {
+		{"labels create", 1, func(c *Client) error { _, e := c.CreateLabel(t.Context(), "name"); return e }},
+		{"labels patch", 1, func(c *Client) error { _, e := c.RenameLabel(t.Context(), "l", "name"); return e }},
+		{"message search and metadata", 2, func(c *Client) error { _, e := c.FindByMessageID(t.Context(), "id@example.com"); return e }},
+		{"inventory and metadata", 2, func(c *Client) error { _, e := c.Inventory(t.Context()); return e }},
+		{"message minimal", 1, func(c *Client) error { _, e := c.Message(t.Context(), "g1"); return e }},
+		{"insert", 1, func(c *Client) error {
 			_, e := c.Insert(t.Context(), strings.NewReader("Subject: test\r\n\r\nbody"), nil)
 			return e
 		}},
-		{"modify", 5, func(c *Client) error { _, e := c.ModifyLabels(t.Context(), "g1", nil, nil); return e }},
-		{"trash", 20, func(c *Client) error { return c.Trash(t.Context(), "g1") }},
+		{"modify", 1, func(c *Client) error { _, e := c.ModifyLabels(t.Context(), "g1", nil, nil); return e }},
+		{"trash", 1, func(c *Client) error { return c.Trash(t.Context(), "g1") }},
 		{"history cursor", 1, func(c *Client) error { _, e := c.CurrentHistoryID(t.Context()); return e }},
 		{"identity profile", 1, func(c *Client) error { _, e := c.DestinationIdentity(t.Context()); return e }},
-		{"history list", 2, func(c *Client) error { _, e := c.ChangesSince(t.Context(), 1); return e }},
+		{"history list", 1, func(c *Client) error { _, e := c.ChangesSince(t.Context(), 1); return e }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			seen := make(map[string]int)
+			calls := 0
 			client := testGmailClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				key := r.Method + " " + r.URL.Path
+				seen[key]++
+				if seen[key] == 1 {
+					return gmailResponse(r, 403, `{"error":{"code":403,"errors":[{"reason":"userRateLimitExceeded"}]}}`), nil
+				}
 				body := `{"id":"g1","payload":{},"historyId":"1","emailAddress":"user@example.com"}`
 				if r.Method == http.MethodGet && r.URL.Path == "/gmail/v1/users/me/messages" {
 					body = `{"messages":[{"id":"g1"}]}`
 				}
 				return gmailResponse(r, 200, body), nil
 			}))
-			p, now, _ := fakePolicy(t)
+			p, _, waits := fakePolicy(t)
 			client.policy = p
 			if err := tc.call(client); err != nil {
 				t.Fatal(err)
 			}
-			if got := p.limiter.TokensAt(*now); got != float64(100-tc.cost) {
-				t.Fatalf("quota remaining=%v want %d", got, 100-tc.cost)
+			if calls != 2*tc.rejections || len(*waits) != tc.rejections {
+				t.Fatalf("calls=%d waits=%d want rejections=%d", calls, len(*waits), tc.rejections)
 			}
 			assertEmptySpoolDirectory(t, dir)
 		})
@@ -226,11 +234,8 @@ func TestInsertSpoolCleanupAndNoAmbiguousRetry(t *testing.T) {
 	}
 }
 
-func TestQuotaPolicyConcurrentReservations(t *testing.T) {
-	p, err := newRequestPolicy(ClientOptions{QuotaUnitsPerMinute: 6000000})
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestQuotaPolicyConcurrentCalls(t *testing.T) {
+	p := newRequestPolicy(ClientOptions{})
 	c := &Client{policy: p}
 	var wg sync.WaitGroup
 	for range 20 {
@@ -323,14 +328,9 @@ func TestModifyQuotaRetryRecreatesImmutableBody(t *testing.T) {
 	}
 }
 
-func TestQuotaOptionsValidation(t *testing.T) {
-	if _, err := New(t.Context(), &http.Client{}, "me", ClientOptions{QuotaUnitsPerMinute: -1}); err == nil {
-		t.Fatal("negative quota accepted")
-	}
+func TestClientOptionsValidation(t *testing.T) {
 	if _, err := New(t.Context(), &http.Client{}, "me", ClientOptions{}, ClientOptions{}); err == nil {
 		t.Fatal("multiple options accepted")
 	}
-	if _, err := methodCost("unknown"); err == nil {
-		t.Fatal("unknown quota method accepted")
-	}
+
 }
