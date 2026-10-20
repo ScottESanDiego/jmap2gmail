@@ -240,7 +240,7 @@ func TestQuotaPolicyConcurrentCalls(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			if _, err := execute(t.Context(), c, "messages.get", func() (int, error) { return 1, nil }); err != nil {
+			if _, err := execute(t.Context(), c, "messages.get", func(context.Context) (int, error) { return 1, nil }); err != nil {
 				t.Error(err)
 			}
 		})

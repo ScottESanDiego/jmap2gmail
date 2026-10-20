@@ -7,14 +7,15 @@ import (
 )
 
 var (
+	ErrMutationRejected                  = errors.New("destination rejected mutation without applying it")
 	ErrNotFound                          = errors.New("destination message not found")
 	ErrCannotCalculateChanges            = errors.New("source cannot calculate changes")
 	ErrCannotCalculateDestinationChanges = errors.New("destination cannot calculate changes")
 )
 
 const (
-	HeaderAccount = "X-Jmapsync-Account"
-	HeaderEmailID = "X-Jmapsync-Email-ID"
+	HeaderAccount = "X-Jmap2gmail-Account"
+	HeaderEmailID = "X-Jmap2gmail-Email-ID"
 )
 
 // Mailbox is the subset of a JMAP Mailbox needed to mirror membership.
@@ -99,7 +100,7 @@ type DestinationIdentity interface {
 }
 
 // DestinationHistory is implemented by destinations that can efficiently
-// report label changes and message deletions made outside jmapsync.
+// report label changes and message deletions made outside jmap2gmail.
 type DestinationHistory interface {
 	CurrentHistoryID(context.Context) (uint64, error)
 	ChangesSince(context.Context, uint64) ([]string, error)

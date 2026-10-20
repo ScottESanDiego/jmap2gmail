@@ -13,7 +13,7 @@ import (
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
 
-	"jmapsync/internal/syncer"
+	"jmap2gmail/internal/syncer"
 )
 
 func TestFindByMessageIDFetchesCandidateLabels(t *testing.T) {
@@ -150,9 +150,9 @@ func TestInventoryPaginatesAndFetchesIdentityMetadata(t *testing.T) {
 				}
 			}
 			body = `{"id":"` + request.URL.Path[len(request.URL.Path)-2:] + `","labelIds":["INBOX"],"payload":{"headers":[` +
-				`{"name":"X-Jmapsync-Account","value":"account"},` +
-				`{"name":"X-Jmapsync-Email-ID","value":"e1"},` +
-				`{"name":"x-jmapsync-email-id","value":"e1-duplicate"},` +
+				`{"name":"X-Jmap2gmail-Account","value":"account"},` +
+				`{"name":"X-Jmap2gmail-Email-ID","value":"e1"},` +
+				`{"name":"x-jmap2gmail-email-id","value":"e1-duplicate"},` +
 				`{"name":"Message-ID","value":"<m1@example.com>"}]}}`
 		default:
 			return nil, fmt.Errorf("unexpected request: %s", request.URL)

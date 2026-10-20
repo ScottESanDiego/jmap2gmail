@@ -101,7 +101,7 @@ func TestQuotaRetriesBeyondFixedAttemptCaps(t *testing.T) {
 	var output bytes.Buffer
 	p.output = &output
 	calls := 0
-	got, err := execute(t.Context(), c, "messages.insert", func() (int, error) {
+	got, err := execute(t.Context(), c, "messages.insert", func(context.Context) (int, error) {
 		calls++
 		if calls <= 40 {
 			return 0, minuteQuota()
@@ -127,7 +127,7 @@ func TestQuotaCancellationDuringBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	p.wait = func(ctx context.Context, delay time.Duration) error { cancel(); return ctx.Err() }
 	calls := 0
-	_, err := execute(ctx, &Client{policy: p}, "labels.list", func() (int, error) { calls++; return 0, minuteQuota() })
+	_, err := execute(ctx, &Client{policy: p}, "labels.list", func(context.Context) (int, error) { calls++; return 0, minuteQuota() })
 	if !errors.Is(err, context.Canceled) || calls != 1 {
 		t.Fatalf("calls=%d error=%v", calls, err)
 	}
@@ -138,7 +138,7 @@ func TestQuotaRecoveryReportsRetriesAndElapsed(t *testing.T) {
 	var output bytes.Buffer
 	p.output = &output
 	calls := 0
-	result, err := execute(t.Context(), &Client{policy: p}, "messages.get", func() (int, error) {
+	result, err := execute(t.Context(), &Client{policy: p}, "messages.get", func(context.Context) (int, error) {
 		calls++
 		*now = now.Add(250 * time.Millisecond)
 		if calls <= 2 {
@@ -176,7 +176,7 @@ func TestQuotaFailuresNeverReportRecovery(t *testing.T) {
 				p.wait = func(context.Context, time.Duration) error { cancel(); return nil }
 			}
 			calls := 0
-			_, err := execute(ctx, &Client{policy: p}, "messages.get", func() (int, error) {
+			_, err := execute(ctx, &Client{policy: p}, "messages.get", func(context.Context) (int, error) {
 				calls++
 				if calls == 1 {
 					return 0, minuteQuota()
@@ -203,7 +203,7 @@ func TestConcurrentQuotaRecoveryDiagnostics(t *testing.T) {
 	for range 20 {
 		wg.Go(func() {
 			calls := 0
-			_, err := execute(t.Context(), c, "messages.get", func() (int, error) {
+			_, err := execute(t.Context(), c, "messages.get", func(context.Context) (int, error) {
 				calls++
 				if calls == 1 {
 					return 0, minuteQuota()
@@ -228,9 +228,9 @@ func TestConcurrentQuotaRecoveryDiagnostics(t *testing.T) {
 	}
 }
 
-func TestQuotaBackoffOutsideHTTPTimeout(t *testing.T) {
+func TestQuotaBackoffOutsideAttemptTimeout(t *testing.T) {
 	calls := 0
-	client, err := New(t.Context(), &http.Client{Timeout: 10 * time.Millisecond, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	client, err := New(t.Context(), &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		if calls == 1 {
 			return gmailResponse(r, 403, `{"error":{"code":403,"errors":[{"reason":"userRateLimitExceeded"}]}}`), nil
@@ -241,6 +241,7 @@ func TestQuotaBackoffOutsideHTTPTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, _, _ := fakePolicy(t)
+	p.attemptTimeout = 10 * time.Millisecond
 	p.wait = func(ctx context.Context, delay time.Duration) error { return waitContext(ctx, 30*time.Millisecond) }
 	client.policy = p
 	started := time.Now()
@@ -259,7 +260,7 @@ func TestSuccessfulRequestsNeverWait(t *testing.T) {
 	client := &Client{policy: p}
 	calls := 0
 	for range 1000 {
-		if _, err := execute(t.Context(), client, "messages.get", func() (int, error) { calls++; return 1, nil }); err != nil {
+		if _, err := execute(t.Context(), client, "messages.get", func(context.Context) (int, error) { calls++; return 1, nil }); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -279,7 +280,7 @@ func TestQuotaExecutorChecksCancellationBeforeEveryAttempt(t *testing.T) {
 				cancel()
 			}
 			calls := 0
-			_, err := execute(ctx, &Client{policy: p}, "messages.get", func() (int, error) { calls++; return 0, minuteQuota() })
+			_, err := execute(ctx, &Client{policy: p}, "messages.get", func(context.Context) (int, error) { calls++; return 0, minuteQuota() })
 			want := 1
 			if precanceled {
 				want = 0

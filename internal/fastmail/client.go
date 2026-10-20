@@ -14,13 +14,13 @@ import (
 	"git.sr.ht/~rockorager/go-jmap/mail/email"
 	"git.sr.ht/~rockorager/go-jmap/mail/mailbox"
 
-	"jmapsync/internal/syncer"
+	"jmap2gmail/internal/syncer"
 )
 
 const (
 	DefaultSessionEndpoint = "https://api.fastmail.com/jmap/session"
 	defaultPageSize        = 500
-	stateProbeID           = "jmapsync-state-probe"
+	stateProbeID           = "jmap2gmail-state-probe"
 )
 
 type Client struct {

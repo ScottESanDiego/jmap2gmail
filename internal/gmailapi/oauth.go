@@ -56,7 +56,9 @@ func AuthenticatedClient(ctx context.Context, credentialsPath, tokenPath string,
 		return nil, err
 	}
 	client := oauth2.NewClient(ctx, source)
-	client.Timeout = 60 * time.Second
+	// Request deadlines belong to SDK attempt contexts. A Client.Timeout on
+	// oauth2.Transport invokes net/http's deprecated CancelRequest path.
+	client.Timeout = 0
 	return client, nil
 }
 
@@ -107,7 +109,7 @@ func tokenChanged(a, b *oauth2.Token) bool {
 
 func tokenRenewalError(err error) error {
 	if response, ok := errors.AsType[*oauth2.RetrieveError](err); ok && response.ErrorCode == "invalid_grant" {
-		return fmt.Errorf("Google OAuth authorization is no longer valid; run jmapsync google-auth again: %w", err)
+		return fmt.Errorf("Google OAuth authorization is no longer valid; run jmap2gmail google-auth again: %w", err)
 	}
 	return fmt.Errorf("renew Google OAuth token: %w", err)
 }
@@ -166,7 +168,7 @@ func Authorize(ctx context.Context, credentialsPath, tokenPath string, output io
 		oauth2.ApprovalForce,
 		oauth2.S256ChallengeOption(verifier),
 	)
-	fmt.Fprintf(output, "Open this URL in a browser and authorize jmapsync to access Gmail:\n\n%s\n\n", authURL)
+	fmt.Fprintf(output, "Open this URL in a browser and authorize jmap2gmail to access Gmail:\n\n%s\n\n", authURL)
 
 	type callbackResult struct {
 		code string
@@ -191,7 +193,7 @@ func Authorize(ctx context.Context, credentialsPath, tokenPath string, output io
 			result <- callbackResult{err: errors.New("Google OAuth callback has no code")}
 			return
 		}
-		_, _ = io.WriteString(writer, "Authorization received. Return to jmapsync to check the result. You can close this window.\n")
+		_, _ = io.WriteString(writer, "Authorization received. Return to jmap2gmail to check the result. You can close this window.\n")
 		result <- callbackResult{code: code}
 	})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
@@ -224,7 +226,7 @@ func Authorize(ctx context.Context, credentialsPath, tokenPath string, output io
 		return fmt.Errorf("exchange Google authorization code: %w", err)
 	}
 	if token.RefreshToken == "" {
-		return errors.New("Google returned no refresh token; revoke jmapsync's access in your Google Account, then run jmapsync google-auth again")
+		return errors.New("Google returned no refresh token; revoke this OAuth application's access in your Google Account, then run jmap2gmail google-auth again")
 	}
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
 		return fmt.Errorf("create Google token directory: %w", err)
@@ -264,7 +266,7 @@ func saveToken(path string, token *oauth2.Token) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create Google token directory: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".jmapsync-google-token-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".jmap2gmail-google-token-*")
 	if err != nil {
 		return fmt.Errorf("create temporary Google token: %w", err)
 	}

@@ -12,7 +12,7 @@ import (
 	"git.sr.ht/~rockorager/go-jmap"
 	"git.sr.ht/~rockorager/go-jmap/mail"
 
-	"jmapsync/internal/syncer"
+	"jmap2gmail/internal/syncer"
 )
 
 func TestClientMapsJMAPResponses(t *testing.T) {
@@ -36,8 +36,8 @@ func TestClientMapsJMAPResponses(t *testing.T) {
 			payload = `{"methodResponses":[["Email/query",{"accountId":"account-1","queryState":"q1","ids":["email-1"],"total":1},"0"]],"sessionState":"session-1"}`
 		case strings.Contains(body, `"Email/changes"`):
 			payload = `{"methodResponses":[["Email/changes",{"accountId":"account-1","oldState":"e1","newState":"e2","created":["email-2"],"updated":["email-1"],"destroyed":["email-0"]},"0"]],"sessionState":"session-1"}`
-		case strings.Contains(body, `"jmapsync-state-probe"`):
-			payload = `{"methodResponses":[["Email/get",{"accountId":"account-1","state":"e1","list":[],"notFound":["jmapsync-state-probe"]},"0"]],"sessionState":"session-1"}`
+		case strings.Contains(body, `"jmap2gmail-state-probe"`):
+			payload = `{"methodResponses":[["Email/get",{"accountId":"account-1","state":"e1","list":[],"notFound":["jmap2gmail-state-probe"]},"0"]],"sessionState":"session-1"}`
 		case strings.Contains(body, `"Email/get"`):
 			payload = `{"methodResponses":[["Email/get",{"accountId":"account-1","state":"e1","list":[{"id":"email-1","blobId":"blob-1","mailboxIds":{"inbox":true},"keywords":{"$seen":true},"messageId":["m1@example.com"],"size":42}]},"0"]],"sessionState":"session-1"}`
 		default:

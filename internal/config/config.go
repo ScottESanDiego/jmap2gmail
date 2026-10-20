@@ -42,10 +42,10 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if config.StateFile == "" {
-		config.StateFile = "~/.local/state/jmapsync/state.json"
+		config.StateFile = "~/.local/state/jmap2gmail/state.json"
 	}
 	if config.Gmail.TokenFile == "" {
-		config.Gmail.TokenFile = "~/.config/jmapsync/google-token.json"
+		config.Gmail.TokenFile = "~/.config/jmap2gmail/google-token.json"
 	}
 	if config.Gmail.User == "" {
 		config.Gmail.User = "me"

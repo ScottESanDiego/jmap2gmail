@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"jmapsync/internal/store"
+	"jmap2gmail/internal/store"
 )
 
 type mirrorDestination struct {

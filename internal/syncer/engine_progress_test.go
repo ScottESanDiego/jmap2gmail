@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"jmapsync/internal/store"
+	"jmap2gmail/internal/store"
 )
 
 // These hooks inspect output from inside the operations whose latency the

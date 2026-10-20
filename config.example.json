@@ -1,20 +1,24 @@
 {
   "fastmail": {
-    "token_file": "~/.config/jmapsync/fastmail-token",
+    "token_file": "~/.config/jmap2gmail/fastmail-token",
     "session_endpoint": "https://api.fastmail.com/jmap/session",
     "include_mailboxes": []
   },
   "gmail": {
-    "credentials_file": "~/.config/jmapsync/google-client.json",
-    "token_file": "~/.config/jmapsync/google-token.json",
+    "credentials_file": "~/.config/jmap2gmail/google-client.json",
+    "token_file": "~/.config/jmap2gmail/google-token.json",
     "user": "me"
   },
-  "state_file": "~/.local/state/jmapsync/state.json",
+  "state_file": "~/.local/state/jmap2gmail/state.json",
   "delete": true,
   "role_labels": {
+    "sent": "Fastmail_Sent",
+    "drafts": "Fastmail_Drafts",
     "archive": "Fastmail_Archive",
     "trash": "Fastmail_Trash",
-    "junk": "Fastmail_Spam"
+    "junk": "Fastmail_Spam",
+    "scheduled": "Fastmail_Scheduled",
+    "snoozed": "Fastmail_Snoozed"
   }
 }
 

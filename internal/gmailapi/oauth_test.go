@@ -75,8 +75,8 @@ func TestAuthenticatedClientRequestTimeout(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if client.Timeout != 60*time.Second {
-				t.Fatalf("client timeout = %v, want 60s", client.Timeout)
+			if client.Timeout != 0 {
+				t.Fatalf("client timeout = %v, want 0", client.Timeout)
 			}
 			for _, callerCancels := range []bool{false, true} {
 				t.Run(fmt.Sprintf("callerCancels=%t", callerCancels), func(t *testing.T) {
@@ -89,11 +89,9 @@ func TestAuthenticatedClientRequestTimeout(t *testing.T) {
 						<-r.Context().Done()
 					}))
 					defer target.Close()
-					ctx, cancel := context.WithCancel(t.Context())
+					ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 					defer cancel()
-					client.Timeout = 100 * time.Millisecond
 					if callerCancels {
-						client.Timeout = 2 * time.Second
 						go func() {
 							select {
 							case <-started:
@@ -241,7 +239,7 @@ func TestRevokedGrantFailsWithReauthorizationGuidance(t *testing.T) {
 	}, expiredToken())
 	before, _ := os.ReadFile(path)
 	_, err := AuthenticatedClient(t.Context(), credentials, path, true)
-	if err == nil || !strings.Contains(err.Error(), "google-auth") {
+	if err == nil || !strings.Contains(err.Error(), "run jmap2gmail google-auth again") {
 		t.Fatalf("error = %v", err)
 	}
 	after, _ := os.ReadFile(path)
@@ -304,7 +302,7 @@ func TestRenewalSaveFailureReturnsError(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".jmapsync-google-token-") {
+		if strings.HasPrefix(entry.Name(), ".jmap2gmail-google-token-") {
 			t.Fatal("failed save left temporary token")
 		}
 	}

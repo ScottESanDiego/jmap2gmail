@@ -189,3 +189,27 @@ func TestInvalidMailboxSelectionFailsBeforePersistentWrites(t *testing.T) {
 		})
 	}
 }
+
+func TestHelpUsesToolCommandName(t *testing.T) {
+	for _, command := range []string{"help", "sync", "google-auth"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			args := []string{command}
+			if command != "help" {
+				args = append(args, "--help")
+			}
+			err := run(t.Context(), args, &stdout, &stderr)
+			if command == "help" && err != nil || command != "help" && !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("help error=%v", err)
+			}
+			output := stdout.String() + stderr.String()
+			want := "Usage: jmap2gmail "
+			if command != "help" {
+				want += command + " "
+			}
+			if !strings.Contains(output, want) {
+				t.Fatalf("help lacks %q:\n%s", want, output)
+			}
+		})
+	}
+}

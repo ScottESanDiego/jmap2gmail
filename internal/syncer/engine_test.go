@@ -18,7 +18,7 @@ import (
 	"strings"
 	"testing"
 
-	"jmapsync/internal/store"
+	"jmap2gmail/internal/store"
 )
 
 type fakeSource struct {
@@ -316,7 +316,7 @@ func testAccountHash() string {
 	return hex.EncodeToString(digest[:])
 }
 
-func testManagedLabel() string { return "jmapsync-managed/" + testAccountHash() }
+func testManagedLabel() string { return "jmap2gmail-managed/" + testAccountHash() }
 
 func TestInitialSyncInsertsAndPersistsCursor(t *testing.T) {
 	source := &fakeSource{
@@ -605,11 +605,11 @@ func TestIncrementalDryRunActionsAreSorted(t *testing.T) {
 		t.Fatal(err)
 	}
 	labels := fmt.Sprintf("[\"INBOX\" \"UNREAD\" \"%s\"]", testManagedLabel())
-	want := "trash Gmail message \"gmail-a\" for destroyed Fastmail email \"a\"\n" +
-		"trash Gmail message \"gmail-z\" for destroyed Fastmail email \"z\"\n" +
-		fmt.Sprintf("insert Fastmail email \"b\" into Gmail with labels %s\n", labels) +
+	want := fmt.Sprintf("insert Fastmail email \"b\" into Gmail with labels %s\n", labels) +
 		fmt.Sprintf("insert Fastmail email \"c\" into Gmail with labels %s\n", labels) +
 		fmt.Sprintf("insert Fastmail email \"d\" into Gmail with labels %s\n", labels) +
+		"trash Gmail message \"gmail-a\" for destroyed Fastmail email \"a\"\n" +
+		"trash Gmail message \"gmail-z\" for destroyed Fastmail email \"z\"\n" +
 		"leave Gmail and state unchanged\n"
 	if got := output.String(); got != want {
 		t.Fatalf("action output:\n%s\nwant:\n%s", got, want)
@@ -818,13 +818,13 @@ func TestIncrementalInsertIsRecoveredAfterMappingSaveFails(t *testing.T) {
 	if err := (store.File{Path: path}).Save(initial); err != nil {
 		t.Fatal(err)
 	}
-	failing := &failNthSaveStore{file: store.File{Path: path}, failAt: 3}
+	failing := &failNthSaveStore{file: store.File{Path: path}, failAt: 4}
 	_, err := (&Engine{Source: source, Destination: destination, Store: failing, Options: Options{Apply: true}}).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "simulated mapping save failure") {
 		t.Fatalf("error = %v, want mapping save failure", err)
 	}
-	if failing.saves != 3 {
-		t.Fatalf("save attempts = %d, want three", failing.saves)
+	if failing.saves != 4 {
+		t.Fatalf("save attempts = %d, want four", failing.saves)
 	}
 	if len(destination.inserted) != 1 {
 		t.Fatalf("first run inserted %d messages, want one", len(destination.inserted))
@@ -839,8 +839,8 @@ func TestIncrementalInsertIsRecoveredAfterMappingSaveFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !persisted.Incomplete || !persisted.Rebuild || persisted.RebuildReason != "was not committed" {
-		t.Fatalf("persisted state = %#v, want incomplete rebuild", persisted)
+	if !persisted.Incomplete || persisted.Resume == nil || persisted.Resume.InsertIntent == nil {
+		t.Fatalf("persisted state = %#v, want durable unknown Insert intent", persisted)
 	}
 	if _, exists := persisted.Messages["e1"]; exists {
 		t.Fatalf("failed mapping save persisted mapping: %#v", persisted.Messages)
@@ -895,7 +895,7 @@ func TestIncompleteCheckpointFailurePreventsGmailMutation(t *testing.T) {
 func TestInsertRewritesIdentityHeadersAndPreservesBody(t *testing.T) {
 	source := oneMessageSource()
 	body := "body\x00bytes\r\nunchanged"
-	source.raw["b1"] = "x-jmapsync-account: attacker\r\n\tfolded\r\nX-JMAPSYNC-EMAIL-ID: wrong\r\n more\r\nSubject: keep\r\n\r\n" + body
+	source.raw["b1"] = "x-jmap2gmail-account: attacker\r\n\tfolded\r\nX-JMAP2GMAIL-EMAIL-ID: wrong\r\n more\r\nSubject: keep\r\n\r\n" + body
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{}, byMessageID: map[string][]Message{}}
 	if _, err := (&Engine{Source: source, Destination: destination, Store: &fakeStore{state: store.New()}, Options: Options{Apply: true}}).Run(t.Context()); err != nil {
 		t.Fatal(err)
@@ -1075,7 +1075,7 @@ func TestRebuildTrashesManagedAndUnmanagedExtras(t *testing.T) {
 	}
 }
 
-func TestFailedFinalCommitLeavesRebuildSignal(t *testing.T) {
+func TestFailedFinalCommitLeavesResumeCheckpoint(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{}, byMessageID: map[string][]Message{}}
 	failing := &failFinalStore{file: store.File{Path: path}}
@@ -1087,8 +1087,8 @@ func TestFailedFinalCommitLeavesRebuildSignal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !loaded.Rebuild || !loaded.Incomplete {
-		t.Fatalf("loaded state = %#v, want incomplete rebuild", loaded)
+	if loaded.Rebuild || !loaded.Incomplete || loaded.Resume == nil || loaded.Resume.Phase != "commit" {
+		t.Fatalf("loaded state = %#v, want resumable commit checkpoint", loaded)
 	}
 	if _, err := (&Engine{Source: oneMessageSource(), Destination: destination, Store: store.File{Path: path}, Options: Options{Apply: true}}).Run(t.Context()); err != nil {
 		t.Fatal(err)
@@ -1140,7 +1140,7 @@ func TestDryRunReportsExactActionsWithoutMutation(t *testing.T) {
 		`create Gmail label "Create Label"`,
 		`rename Gmail label "Old Label" to "New Label"`,
 		`adopt Gmail message "g1" for Fastmail email "e1"`,
-		`modify Gmail message "g1" labels (add=["INBOX" "UNREAD" "jmapsync-managed/`,
+		`modify Gmail message "g1" labels (add=["INBOX" "UNREAD" "jmap2gmail-managed/`,
 		`trash Gmail message "gone" for destroyed Fastmail email "gone-source"`,
 		`ignore marked Gmail spam message "spam"`,
 		`leave Gmail and state unchanged`,

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,17 +17,18 @@ import (
 	"google.golang.org/api/googleapi"
 )
 
-// ClientOptions controls diagnostics for Gmail quota retries.
+// ClientOptions controls diagnostics for Gmail retries.
 type ClientOptions struct {
 	Diagnostics io.Writer
 }
 
 type requestPolicy struct {
-	now    func() time.Time
-	wait   func(context.Context, time.Duration) error
-	jitter func() time.Duration
-	output io.Writer
-	logMu  sync.Mutex
+	attemptTimeout time.Duration
+	now            func() time.Time
+	wait           func(context.Context, time.Duration) error
+	jitter         func() time.Duration
+	output         io.Writer
+	logMu          sync.Mutex
 }
 
 func newRequestPolicy(options ClientOptions) *requestPolicy {
@@ -34,7 +37,7 @@ func newRequestPolicy(options ClientOptions) *requestPolicy {
 		output = io.Discard
 	}
 	return &requestPolicy{
-		now: time.Now, wait: waitContext,
+		attemptTimeout: 60 * time.Second, now: time.Now, wait: waitContext,
 		jitter: func() time.Duration { return rand.N(time.Second) }, output: output,
 	}
 }
@@ -62,9 +65,9 @@ func (p *requestPolicy) logRecovery(method string, retries int, elapsed time.Dur
 	fmt.Fprintf(p.output, "Gmail quota: recovered %s after %d quota retries (elapsed %s)\n", method, retries, elapsed.Round(time.Millisecond))
 }
 
-// execute surrounds a single fresh SDK call. Only explicit quota rejections
-// delay and replay; waiting stays outside the HTTP client's attempt timeout.
-func execute[T any](ctx context.Context, c *Client, method string, attempt func() (T, error)) (T, error) {
+// execute bounds each fresh SDK call, including response decoding. Backoff
+// uses the parent context, so waits do not consume the next attempt's deadline.
+func execute[T any](ctx context.Context, c *Client, method string, attempt func(context.Context) (T, error)) (T, error) {
 	var zero T
 	c.policyOnce.Do(func() {
 		if c.policy == nil {
@@ -73,32 +76,93 @@ func execute[T any](ctx context.Context, c *Client, method string, attempt func(
 	})
 	p := c.policy
 	started := p.now()
-	retries := 0
-	hadQuota := false
+	quotaRetries, timeoutRetries := 0, 0
+	pending := ""
 	backoff := time.Second
 	for {
 		if err := ctx.Err(); err != nil {
 			return zero, err
 		}
-		if hadQuota {
-			retries++
+		switch pending {
+		case "quota":
+			quotaRetries++
+		case "timeout":
+			timeoutRetries++
 		}
-		result, err := attempt()
-		if !isMinuteQuotaError(err) {
-			if err == nil && hadQuota {
-				p.logRecovery(method, retries, p.now().Sub(started))
+		attemptCtx, cancel := context.WithTimeout(ctx, p.attemptTimeout)
+		result, err := attempt(attemptCtx)
+		attemptErr := attemptCtx.Err()
+		cancel()
+		// A decoded successful response confirms even a write whose deadline
+		// raced with completion. Return its ID so the engine can checkpoint it.
+		if err == nil {
+			if quotaRetries+timeoutRetries > 0 {
+				if timeoutRetries == 0 {
+					p.logRecovery(method, quotaRetries, p.now().Sub(started))
+				} else {
+					p.logMu.Lock()
+					fmt.Fprintf(p.output, "Gmail retry: recovered %s after %d quota retries and %d timeout retries (elapsed %s)\n", method, quotaRetries, timeoutRetries, p.now().Sub(started).Round(time.Millisecond))
+					p.logMu.Unlock()
+				}
 			}
+			return result, nil
+		}
+		_, conclusiveHTTP := errors.AsType[*googleapi.Error](err)
+		if parentErr := ctx.Err(); parentErr != nil {
+			if conclusiveHTTP {
+				return result, errors.Join(err, parentErr)
+			}
+			return zero, parentErr
+		}
+		if !conclusiveHTTP && errors.Is(attemptErr, context.DeadlineExceeded) && !isTimeoutError(err) {
+			err = errors.Join(err, attemptErr)
+		}
+		quota := isMinuteQuotaError(err)
+		timeout := !quota && !conclusiveHTTP && timeoutRetryMethod(method) && isTimeoutError(err)
+		if !quota && !timeout {
 			return result, err
 		}
-		hadQuota = true
 		delay := min(backoff+p.jitter(), 64*time.Second)
-		delay = max(delay, serverRetryDelay(err, p.now()))
-		p.logWait(method, delay)
+		if quota {
+			pending = "quota"
+			delay = max(delay, serverRetryDelay(err, p.now()))
+			p.logWait(method, delay)
+		} else {
+			pending = "timeout"
+			p.logMu.Lock()
+			fmt.Fprintf(p.output, "Gmail timeout: retrying %s after attempt %d (elapsed %s), waiting %s\n", method, quotaRetries+timeoutRetries+1, p.now().Sub(started).Round(time.Millisecond), delay.Round(time.Millisecond))
+			p.logMu.Unlock()
+		}
 		if err := p.wait(ctx, delay); err != nil {
-			return zero, fmt.Errorf("wait to retry Gmail quota: %w", err)
+			return zero, fmt.Errorf("wait to retry Gmail %s: %w", pending, err)
 		}
 		backoff = min(backoff*2, 64*time.Second)
 	}
+}
+
+func timeoutRetryMethod(method string) bool {
+	switch method {
+	case "labels.list", "getProfile", "messages.get", "messages.list", "history.list":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if network, ok := err.(net.Error); ok && network.Timeout() {
+		return true
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		return slices.ContainsFunc(wrapped.Unwrap(), isTimeoutError)
+	case interface{ Unwrap() error }:
+		return isTimeoutError(wrapped.Unwrap())
+	}
+	return false
 }
 
 func isMinuteQuotaError(err error) bool {

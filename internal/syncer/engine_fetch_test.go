@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"jmapsync/internal/store"
+	"jmap2gmail/internal/store"
 )
 
 type fetchSource struct {
@@ -156,24 +156,24 @@ func TestLaterSourceBatchFailurePreservesCursor(t *testing.T) {
 	if state.EmailState != "s1" || !state.Incomplete {
 		t.Fatalf("failed batch advanced cursor or cleared checkpoint: %#v", state)
 	}
-	if len(destination.inserted) != 1 || state.Messages["e1"].GmailID == "" {
-		t.Fatalf("earlier successful batch lost: inserted=%v state=%#v", destination.inserted, state)
+	if len(destination.inserted) != 0 || state.Resume == nil || len(state.Resume.Work) != 0 || len(state.SourceEmails) != 0 {
+		t.Fatalf("partial metadata plan was lost or applied before discovery completed: inserted=%v state=%#v", destination.inserted, state)
 	}
 }
 
 func TestMissingIncrementalMetadataRetainsMapping(t *testing.T) {
-	base := &fakeSource{state: "s2", changes: []Changes{{NewState: "s2", Updated: []string{"gone"}}}}
+	base := &fakeSource{state: "s2", ids: []string{"gone"}, changes: []Changes{{NewState: "s2", Updated: []string{"gone"}}}}
 	state := store.New()
 	state.MailboxScope = mailboxScopeFingerprint(nil, true)
 	state.EmailState = "s1"
 	state.Messages["gone"] = store.Message{GmailID: "gmail-gone"}
 	destination := &fakeDestination{labels: standardLabels(), messages: map[string]Message{"gmail-gone": {ID: "gmail-gone"}}}
 	_, err := (&Engine{Source: base, Destination: destination, Store: &fakeStore{state: state}, Options: Options{Apply: true, Delete: true}}).Run(t.Context())
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "snapshot was incomplete") {
+		t.Fatalf("error = %v, want incomplete metadata failure", err)
 	}
-	if state.EmailState != "s2" || state.Incomplete {
-		t.Fatalf("successful page not committed: %#v", state)
+	if state.EmailState != "s1" || !state.Incomplete {
+		t.Fatalf("incomplete page advanced cursor: %#v", state)
 	}
 	if state.Messages["gone"].GmailID != "gmail-gone" || state.Messages["gone"].SourceDeleted || len(destination.trashed) != 0 {
 		t.Fatalf("missing metadata treated as deletion: state=%#v trashed=%v", state, destination.trashed)

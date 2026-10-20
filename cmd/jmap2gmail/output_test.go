@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"jmapsync/internal/gmailapi"
-	"jmapsync/internal/store"
-	"jmapsync/internal/syncer"
+	"jmap2gmail/internal/gmailapi"
+	"jmap2gmail/internal/store"
+	"jmap2gmail/internal/syncer"
 )
 
 type outputSource struct{ syncer.Source }
@@ -108,10 +108,9 @@ func (f outputRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { re
 func TestSyncGmailRetryDiagnosticsFollowVerboseWriter(t *testing.T) {
 	for _, verbose := range []bool{false, true} {
 		var stdout, stderr bytes.Buffer
-		ctx, cancel := context.WithCancel(t.Context())
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 		diagnostics := syncDiagnosticWriter(verbose, &stderr)
 		client, err := gmailapi.New(ctx, &http.Client{Transport: outputRoundTrip(func(r *http.Request) (*http.Response, error) {
-			cancel()
 			return &http.Response{StatusCode: 429, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"code":429}}`)), Request: r}, nil
 		})}, "me", gmailapi.ClientOptions{Diagnostics: diagnostics})
 		if err != nil {
@@ -120,7 +119,7 @@ func TestSyncGmailRetryDiagnosticsFollowVerboseWriter(t *testing.T) {
 		engine := &syncer.Engine{Source: outputSource{}, Destination: client, Store: store.NewMemory(), Options: syncer.Options{Output: diagnostics}}
 		err = runSyncEngine(ctx, engine, &stdout, true)
 		cancel()
-		if !errors.Is(err, context.Canceled) {
+		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("verbose=%v error=%v", verbose, err)
 		}
 		if stdout.Len() != 0 {
@@ -135,21 +134,27 @@ func TestSyncGmailRetryDiagnosticsFollowVerboseWriter(t *testing.T) {
 	}
 }
 
-func TestSyncHTTPTimeoutRemainsAnErrorWithoutSummary(t *testing.T) {
+func TestSyncCallerDeadlineRemainsAnErrorWithoutSummary(t *testing.T) {
 	for _, verbose := range []bool{false, true} {
 		var stdout, stderr bytes.Buffer
 		diagnostics := syncDiagnosticWriter(verbose, &stderr)
-		client, err := gmailapi.New(t.Context(), &http.Client{Timeout: 5 * time.Millisecond, Transport: outputRoundTrip(func(r *http.Request) (*http.Response, error) { <-r.Context().Done(); return nil, r.Context().Err() })}, "me", gmailapi.ClientOptions{Diagnostics: diagnostics})
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		client, err := gmailapi.New(ctx, &http.Client{Transport: outputRoundTrip(func(r *http.Request) (*http.Response, error) { <-r.Context().Done(); return nil, r.Context().Err() })}, "me", gmailapi.ClientOptions{Diagnostics: diagnostics})
 		if err != nil {
+			cancel()
 			t.Fatal(err)
 		}
 		engine := &syncer.Engine{Source: outputSource{}, Destination: client, Store: store.NewMemory(), Options: syncer.Options{Output: diagnostics}}
-		err = runSyncEngine(t.Context(), engine, &stdout, true)
+		err = runSyncEngine(ctx, engine, &stdout, true)
+		cancel()
 		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("verbose=%v HTTP timeout suppressed: %v", verbose, err)
+			t.Fatalf("verbose=%v caller deadline suppressed: %v", verbose, err)
 		}
 		if stdout.Len() != 0 {
 			t.Fatalf("timeout printed summary: %q", stdout.String())
+		}
+		if !verbose && stderr.Len() != 0 {
+			t.Fatalf("quiet timeout diagnostics=%q", stderr.String())
 		}
 	}
 }

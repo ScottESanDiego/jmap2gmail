@@ -15,7 +15,7 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
-	"jmapsync/internal/syncer"
+	"jmap2gmail/internal/syncer"
 )
 
 type Client struct {
@@ -48,8 +48,8 @@ func New(ctx context.Context, httpClient *http.Client, user string, options ...C
 }
 
 func (c *Client) Labels(ctx context.Context) ([]syncer.Label, error) {
-	response, err := execute(ctx, c, "labels.list", func() (*gmail.ListLabelsResponse, error) {
-		return c.service.Users.Labels.List(c.user).Context(ctx).Do()
+	response, err := execute(ctx, c, "labels.list", func(attemptCtx context.Context) (*gmail.ListLabelsResponse, error) {
+		return c.service.Users.Labels.List(c.user).Context(attemptCtx).Do()
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list Gmail labels: %w", err)
@@ -62,10 +62,10 @@ func (c *Client) Labels(ctx context.Context) ([]syncer.Label, error) {
 }
 
 func (c *Client) CreateLabel(ctx context.Context, name string) (syncer.Label, error) {
-	label, err := execute(ctx, c, "labels.create", func() (*gmail.Label, error) {
+	label, err := execute(ctx, c, "labels.create", func(attemptCtx context.Context) (*gmail.Label, error) {
 		return c.service.Users.Labels.Create(c.user, &gmail.Label{
 			Name: name, LabelListVisibility: "labelShow", MessageListVisibility: "show",
-		}).Context(ctx).Do()
+		}).Context(attemptCtx).Do()
 	})
 	if err != nil {
 		return syncer.Label{}, fmt.Errorf("create Gmail label %q: %w", name, err)
@@ -74,8 +74,8 @@ func (c *Client) CreateLabel(ctx context.Context, name string) (syncer.Label, er
 }
 
 func (c *Client) RenameLabel(ctx context.Context, id, name string) (syncer.Label, error) {
-	label, err := execute(ctx, c, "labels.patch", func() (*gmail.Label, error) {
-		return c.service.Users.Labels.Patch(c.user, id, &gmail.Label{Name: name}).Context(ctx).Do()
+	label, err := execute(ctx, c, "labels.patch", func(attemptCtx context.Context) (*gmail.Label, error) {
+		return c.service.Users.Labels.Patch(c.user, id, &gmail.Label{Name: name}).Context(attemptCtx).Do()
 	})
 	if err != nil {
 		return syncer.Label{}, fmt.Errorf("rename Gmail label %q to %q: %w", id, name, err)
@@ -104,7 +104,7 @@ func (c *Client) listMessages(ctx context.Context, query string) ([]syncer.Messa
 	pageToken := ""
 	for {
 		seenTokens[pageToken] = true
-		response, err := execute(ctx, c, "messages.list", func() (*gmail.ListMessagesResponse, error) {
+		response, err := execute(ctx, c, "messages.list", func(attemptCtx context.Context) (*gmail.ListMessagesResponse, error) {
 			call := c.service.Users.Messages.List(c.user).
 				IncludeSpamTrash(true).MaxResults(500).Fields("messages(id),nextPageToken")
 			if query != "" {
@@ -113,7 +113,7 @@ func (c *Client) listMessages(ctx context.Context, query string) ([]syncer.Messa
 			if pageToken != "" {
 				call = call.PageToken(pageToken)
 			}
-			return call.Context(ctx).Do()
+			return call.Context(attemptCtx).Do()
 		})
 		if err != nil {
 			return nil, fmt.Errorf("list Gmail messages: %w", err)
@@ -149,12 +149,12 @@ func (c *Client) listMessages(ctx context.Context, query string) ([]syncer.Messa
 }
 
 func (c *Client) metadataMessage(ctx context.Context, id string) (syncer.Message, error) {
-	message, err := execute(ctx, c, "messages.get", func() (*gmail.Message, error) {
+	message, err := execute(ctx, c, "messages.get", func(attemptCtx context.Context) (*gmail.Message, error) {
 		return c.service.Users.Messages.Get(c.user, id).
 			Format("metadata").
 			MetadataHeaders(syncer.HeaderAccount, syncer.HeaderEmailID, "Message-ID").
 			Fields("id,labelIds,payload(headers)").
-			Context(ctx).Do()
+			Context(attemptCtx).Do()
 	})
 	if isHTTPStatus(err, http.StatusNotFound) {
 		return syncer.Message{}, fmt.Errorf("%w: Gmail message %q", syncer.ErrNotFound, id)
@@ -186,11 +186,11 @@ func (c *Client) metadataMessage(ctx context.Context, id string) (syncer.Message
 }
 
 func (c *Client) Message(ctx context.Context, id string) (syncer.Message, error) {
-	message, err := execute(ctx, c, "messages.get", func() (*gmail.Message, error) {
+	message, err := execute(ctx, c, "messages.get", func(attemptCtx context.Context) (*gmail.Message, error) {
 		return c.service.Users.Messages.Get(c.user, id).
 			Format("minimal").
 			Fields("id,labelIds").
-			Context(ctx).Do()
+			Context(attemptCtx).Do()
 	})
 	if isHTTPStatus(err, http.StatusNotFound) {
 		return syncer.Message{}, fmt.Errorf("%w: Gmail message %q", syncer.ErrNotFound, id)
@@ -208,7 +208,7 @@ func (c *Client) Insert(ctx context.Context, raw io.Reader, labelIDs []string) (
 	// A quota response can arrive after the source stream has been consumed.
 	// Spool once so every explicitly rejected attempt can replay exact MIME with
 	// bounded memory; no ambiguous failure is replayed.
-	spool, err := os.CreateTemp("", "jmapsync-gmail-*.eml")
+	spool, err := os.CreateTemp("", "jmap2gmail-gmail-*.eml")
 	if err != nil {
 		return syncer.Message{}, fmt.Errorf("create Gmail insert spool: %w", err)
 	}
@@ -218,13 +218,16 @@ func (c *Client) Insert(ctx context.Context, raw io.Reader, labelIDs []string) (
 		return syncer.Message{}, fmt.Errorf("spool Gmail message: %w", err)
 	}
 	labels := slices.Clone(labelIDs)
-	message, err := execute(ctx, c, "messages.insert", func() (*gmail.Message, error) {
+	message, err := execute(ctx, c, "messages.insert", func(attemptCtx context.Context) (*gmail.Message, error) {
 		return c.service.Users.Messages.Insert(c.user, &gmail.Message{LabelIds: slices.Clone(labels)}).
 			InternalDateSource("dateHeader").
 			Media(io.NewSectionReader(spool, 0, spooledSize), googleapi.ContentType("message/rfc822"), googleapi.ChunkSize(0)).
-			Fields("id,labelIds").Context(ctx).Do()
+			Fields("id,labelIds").Context(attemptCtx).Do()
 	})
 	if err != nil {
+		if isHTTPStatus(err, http.StatusBadRequest) {
+			err = errors.Join(syncer.ErrMutationRejected, err)
+		}
 		return syncer.Message{}, fmt.Errorf("insert Gmail message: %w", err)
 	}
 	return syncer.Message{ID: message.Id, LabelIDs: append([]string(nil), message.LabelIds...)}, nil
@@ -244,8 +247,8 @@ func (r contextReader) Read(p []byte) (int, error) {
 
 func (c *Client) ModifyLabels(ctx context.Context, id string, add, remove []string) (syncer.Message, error) {
 	addSnapshot, removeSnapshot := slices.Clone(add), slices.Clone(remove)
-	message, err := execute(ctx, c, "messages.modify", func() (*gmail.Message, error) {
-		return c.service.Users.Messages.Modify(c.user, id, &gmail.ModifyMessageRequest{AddLabelIds: slices.Clone(addSnapshot), RemoveLabelIds: slices.Clone(removeSnapshot)}).Fields("id,labelIds").Context(ctx).Do()
+	message, err := execute(ctx, c, "messages.modify", func(attemptCtx context.Context) (*gmail.Message, error) {
+		return c.service.Users.Messages.Modify(c.user, id, &gmail.ModifyMessageRequest{AddLabelIds: slices.Clone(addSnapshot), RemoveLabelIds: slices.Clone(removeSnapshot)}).Fields("id,labelIds").Context(attemptCtx).Do()
 	})
 	if isHTTPStatus(err, http.StatusNotFound) {
 		return syncer.Message{}, fmt.Errorf("%w: Gmail message %q", syncer.ErrNotFound, id)
@@ -257,7 +260,9 @@ func (c *Client) ModifyLabels(ctx context.Context, id string, add, remove []stri
 }
 
 func (c *Client) Trash(ctx context.Context, id string) error {
-	_, err := execute(ctx, c, "messages.trash", func() (*gmail.Message, error) { return c.service.Users.Messages.Trash(c.user, id).Context(ctx).Do() })
+	_, err := execute(ctx, c, "messages.trash", func(attemptCtx context.Context) (*gmail.Message, error) {
+		return c.service.Users.Messages.Trash(c.user, id).Context(attemptCtx).Do()
+	})
 	if isHTTPStatus(err, http.StatusNotFound) {
 		return nil
 	}
@@ -268,8 +273,8 @@ func (c *Client) Trash(ctx context.Context, id string) error {
 }
 
 func (c *Client) CurrentHistoryID(ctx context.Context) (uint64, error) {
-	profile, err := execute(ctx, c, "getProfile", func() (*gmail.Profile, error) {
-		return c.service.Users.GetProfile(c.user).Fields("historyId").Context(ctx).Do()
+	profile, err := execute(ctx, c, "getProfile", func(attemptCtx context.Context) (*gmail.Profile, error) {
+		return c.service.Users.GetProfile(c.user).Fields("historyId").Context(attemptCtx).Do()
 	})
 	if err != nil {
 		return 0, fmt.Errorf("get Gmail history cursor: %w", err)
@@ -281,8 +286,8 @@ func (c *Client) CurrentHistoryID(ctx context.Context) (uint64, error) {
 }
 
 func (c *Client) DestinationIdentity(ctx context.Context) (string, error) {
-	profile, err := execute(ctx, c, "getProfile", func() (*gmail.Profile, error) {
-		return c.service.Users.GetProfile(c.user).Fields("emailAddress").Context(ctx).Do()
+	profile, err := execute(ctx, c, "getProfile", func(attemptCtx context.Context) (*gmail.Profile, error) {
+		return c.service.Users.GetProfile(c.user).Fields("emailAddress").Context(attemptCtx).Do()
 	})
 	if err != nil {
 		return "", fmt.Errorf("get Gmail account identity: %w", err)
@@ -299,7 +304,7 @@ func (c *Client) ChangesSince(ctx context.Context, start uint64) ([]string, erro
 	pageToken := ""
 	for {
 		seenTokens[pageToken] = true
-		response, err := execute(ctx, c, "history.list", func() (*gmail.ListHistoryResponse, error) {
+		response, err := execute(ctx, c, "history.list", func(attemptCtx context.Context) (*gmail.ListHistoryResponse, error) {
 			call := c.service.Users.History.List(c.user).
 				StartHistoryId(start).
 				HistoryTypes("messageAdded", "labelAdded", "labelRemoved", "messageDeleted").
@@ -308,7 +313,7 @@ func (c *Client) ChangesSince(ctx context.Context, start uint64) ([]string, erro
 			if pageToken != "" {
 				call = call.PageToken(pageToken)
 			}
-			return call.Context(ctx).Do()
+			return call.Context(attemptCtx).Do()
 		})
 		if isHTTPStatus(err, http.StatusNotFound) {
 			return nil, fmt.Errorf("%w: Gmail history %d", syncer.ErrCannotCalculateDestinationChanges, start)

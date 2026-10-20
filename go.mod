@@ -1,4 +1,4 @@
-module jmapsync
+module jmap2gmail
 
 go 1.27.2
 

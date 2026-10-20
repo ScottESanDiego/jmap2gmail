@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func printMailboxDiagnostics(output io.Writer, kind string, paths map[string]string, selected []string) {
+func printMailboxDiagnostics(output io.Writer, kind string, paths, roles map[string]string, selected []string) {
 	ids := selected
 	all := selected == nil
 	if all {
@@ -32,7 +32,7 @@ func printMailboxDiagnostics(output io.Writer, kind string, paths map[string]str
 	}
 	fmt.Fprintln(output, ":")
 	for _, id := range ids {
-		fmt.Fprintf(output, "verbose:   path=%q id=%q\n", paths[id], id)
+		fmt.Fprintf(output, "verbose:   path=%q id=%q role=%q\n", paths[id], id, roles[id])
 	}
 }
 

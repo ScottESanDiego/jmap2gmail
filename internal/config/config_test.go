@@ -121,3 +121,21 @@ func TestLoadIncludeMailboxes(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultStoragePathsUseToolName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.StateFile != filepath.Join(home, ".local", "state", "jmap2gmail", "state.json") || loaded.Gmail.TokenFile != filepath.Join(home, ".config", "jmap2gmail", "google-token.json") {
+		t.Fatalf("default storage paths: state=%q token=%q", loaded.StateFile, loaded.Gmail.TokenFile)
+	}
+}

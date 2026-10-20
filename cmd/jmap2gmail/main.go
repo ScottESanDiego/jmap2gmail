@@ -11,18 +11,18 @@ import (
 	"strings"
 	"syscall"
 
-	"jmapsync/internal/config"
-	"jmapsync/internal/fastmail"
-	"jmapsync/internal/gmailapi"
-	"jmapsync/internal/store"
-	"jmapsync/internal/syncer"
+	"jmap2gmail/internal/config"
+	"jmap2gmail/internal/fastmail"
+	"jmap2gmail/internal/gmailapi"
+	"jmap2gmail/internal/store"
+	"jmap2gmail/internal/syncer"
 )
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, "jmapsync:", err)
+		fmt.Fprintln(os.Stderr, "jmap2gmail:", err)
 		os.Exit(1)
 	}
 }
@@ -49,6 +49,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 func runGoogleAuth(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("google-auth", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	flags.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: jmap2gmail google-auth [options]\n\nOptions:")
+		flags.PrintDefaults()
+	}
 	configPath := flags.String("config", "config.json", "path to the JSON config file")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -112,12 +116,17 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 			return err
 		}
 		var paths map[string]string
+		var roles map[string]string
 		if *verbose {
 			paths, err = syncer.MailboxPaths(mailboxes)
 			if err != nil {
 				return err
 			}
-			printMailboxDiagnostics(diagnostics, "available", paths, nil)
+			roles = make(map[string]string, len(mailboxes))
+			for _, mailbox := range mailboxes {
+				roles[mailbox.ID] = mailbox.Role
+			}
+			printMailboxDiagnostics(diagnostics, "available", paths, roles, nil)
 		}
 		selected, err := syncer.ResolveMailboxIDs(mailboxes, settings.Fastmail.IncludeMailboxes)
 		if err != nil {
@@ -127,7 +136,7 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 			return err
 		}
 		if *verbose {
-			printMailboxDiagnostics(diagnostics, "selected", paths, selected)
+			printMailboxDiagnostics(diagnostics, "selected", paths, roles, selected)
 		}
 	}
 	stateStore, closeState, err := syncStateBackend(*noCache, apply, settings.StateFile)
@@ -163,7 +172,7 @@ func runSync(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	return runSyncEngine(ctx, engine, stdout, *dryRun)
 }
 
-const syncHelp = `Usage: jmapsync sync [options]
+const syncHelp = `Usage: jmap2gmail sync [options]
 
 Mirror Fastmail to Gmail. Fastmail is the source of truth.
 Sync applies Gmail changes and updates the optional cache by default.
@@ -178,8 +187,8 @@ Cache and credentials:
   Google access uses only gmail.modify.
 
 Message handling:
-  New inserts carry one X-Jmapsync-Account header, one X-Jmapsync-Email-ID
-  header, and one account-specific jmapsync-managed label.
+  New inserts carry one X-Jmap2gmail-Account header, one X-Jmap2gmail-Email-ID
+  header, and one account-specific jmap2gmail-managed label.
   Adopt existing mail only when one source message and one Gmail message
   share a Message-ID.
   With delete enabled, every non-SPAM Gmail message absent from the Fastmail
@@ -208,10 +217,12 @@ Output and timeouts:
   With --verbose, rebuild phases, Fastmail metadata counts, and local matching
   counts show progress.
   Updates run between operations; a pending request can delay output.
-  Each Gmail HTTP attempt times out after 60 seconds, excluding quota waits.
+  Each Gmail request attempt has a 60-second deadline, including body decoding.
+  Retry waits fall outside that deadline; caller cancellation stops the operation.
   Requests proceed without proactive pacing.
   Explicit minute quota limits retry until success or cancellation.
-  With --verbose, quota retry waits appear on stderr, including during dry runs.
+  Read timeouts retry; ambiguous write timeouts return errors without replay.
+  With --verbose, retry waits and recoveries appear on stderr, including dry runs.
 
 go-jmap reads Fastmail. Official Google API and OAuth clients access Gmail.
 
@@ -238,11 +249,11 @@ func syncStateBackend(noCache, apply bool, statePath string) (syncer.StateStore,
 }
 
 func printUsage(output io.Writer) {
-	fmt.Fprintln(output, `Usage: jmapsync <command> [options]
+	fmt.Fprintln(output, `Usage: jmap2gmail <command> [options]
 
 Commands:
   google-auth  authorize the Gmail API and save a refresh token
   sync         mirror Fastmail to Gmail; add --dry-run to preview
 
-Run "jmapsync <command> -h" for command options.`)
+Run "jmap2gmail <command> -h" for command options.`)
 }

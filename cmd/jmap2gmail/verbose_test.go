@@ -13,7 +13,7 @@ import (
 )
 
 // Deliberately unsorted, with control characters that must stay on one output line.
-const diagnosticMailboxes = `[{"id":"z","name":"Zebra"},{"id":"q","name":"Quoted\"\nFolder"},{"id":"c","name":"Don Trust and Will","parentId":"i"},{"id":"i","name":"Inbox"}]`
+const diagnosticMailboxes = `[{"id":"z","name":"Zebra","role":"snoozed"},{"id":"q","name":"Quoted\"\nFolder","role":"extension\"\nrole"},{"id":"c","name":"Don Trust and Will","parentId":"i"},{"id":"i","name":"Inbox","role":"inbox"}]`
 
 func diagnosticConfig(t *testing.T, selectors []string, endpoint string) (string, string) {
 	t.Helper()
@@ -128,7 +128,7 @@ func TestVerboseMailboxPreflight(t *testing.T) {
 					t.Fatalf("quiet stderr: %s", out)
 				}
 			} else {
-				want := "verbose: available Fastmail folders (4):\nverbose:   path=\"Inbox\" id=\"i\"\nverbose:   path=\"Inbox/Don Trust and Will\" id=\"c\"\nverbose:   path=\"Quoted\\\"\\nFolder\" id=\"q\"\nverbose:   path=\"Zebra\" id=\"z\"\n"
+				want := "verbose: available Fastmail folders (4):\nverbose:   path=\"Inbox\" id=\"i\" role=\"inbox\"\nverbose:   path=\"Inbox/Don Trust and Will\" id=\"c\" role=\"\"\nverbose:   path=\"Quoted\\\"\\nFolder\" id=\"q\" role=\"extension\\\"\\nrole\"\nverbose:   path=\"Zebra\" id=\"z\" role=\"snoozed\"\n"
 				if !strings.Contains(out, want) {
 					t.Fatalf("missing sorted escaped folder diagnostics:\n%s\nwant:\n%s", out, want)
 				}
@@ -156,7 +156,7 @@ func TestVerboseMailboxPreflight(t *testing.T) {
 				if !strings.Contains(err.Error(), "credentials") {
 					t.Fatalf("want intentional Gmail credential error: %v", err)
 				}
-				want := "verbose: selected Fastmail folders (1):\nverbose:   path=\"Inbox/Don Trust and Will\" id=\"c\"\n"
+				want := "verbose: selected Fastmail folders (1):\nverbose:   path=\"Inbox/Don Trust and Will\" id=\"c\" role=\"\"\n"
 				if len(test.selectors) == 0 {
 					want = "verbose: selected Fastmail folders (4) (all mail):"
 				}

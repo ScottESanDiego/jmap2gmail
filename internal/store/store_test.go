@@ -164,7 +164,7 @@ func TestAcquireLockRejectsOverlappingRun(t *testing.T) {
 	}
 
 	second, err := AcquireLock(statePath)
-	if err == nil || !strings.Contains(err.Error(), "another jmapsync") {
+	if err == nil || !strings.Contains(err.Error(), "another jmap2gmail") {
 		if second != nil {
 			_ = second.Close()
 		}

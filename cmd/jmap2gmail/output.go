@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"jmapsync/internal/syncer"
+	"jmap2gmail/internal/syncer"
 )
 
 func syncDiagnosticWriter(verbose bool, stderr io.Writer) io.Writer {

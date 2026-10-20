@@ -1,235 +1,294 @@
-# jmapsync design
+# jmap2gmail design
 
-Fastmail is the source of truth. The tool reads Fastmail through JMAP and writes
-Gmail through `users.messages.insert`.
+Fastmail is the source of truth. jmap2gmail reads it through the JSON Meta
+Application Protocol (JMAP) and inserts messages through Gmail's
+`users.messages.insert`. It never writes to Fastmail or sends mail.
 
-The program is a one-shot command for cron every 5–15 minutes. It has no daemon
-mode and keeps no persistent connection.
-
-## Identity and recovery
-
-One JMAP Email maps to one Gmail message. Each new Gmail insert gets one
-`X-Jmapsync-Account` and one `X-Jmapsync-Email-ID` header. The insert path
-removes source-supplied copies first.
-
-The account value is a stable hash of the Fastmail account identity. The tool
-also adds `jmapsync-managed/<account-hash>`. Every normal reconcile preserves
-that label. The marker and headers recover identity; they do not define a
-deletion boundary.
-
-The JMAP Email ID stays the same across mailbox moves. The two headers and
-marker label preserve the mapping. They let the tool recover after a crash or
-cache loss without inserting a duplicate.
-
-Initial adoption requires one source and one Gmail message to share an RFC
-Message-ID. Adoption adds the marker label but cannot rewrite the Gmail
-message's headers. Gmail blocks header changes after insertion.
-
-The rebuild preflight rejects bad or conflicting identity headers. It also
-rejects missing legacy IDs, duplicate Gmail matches, and shared source matches.
-These checks run before the rebuild changes Gmail. Errors tell the user what
-to repair.
+The command runs once, for example from cron every 5–15 minutes. It has no
+daemon mode or persistent connection.
 
 ## Mirror rules
 
-- Mailbox membership and supported keywords map to Gmail labels.
-- Fastmail Trash and Junk use `Fastmail_Trash` and `Fastmail_Spam`.
-- With `delete` enabled, every non-spam Gmail message absent from the Fastmail
-  source view moves to Trash, including unmarked or unrelated Gmail mail.
-  With deletion disabled, extra Gmail messages stay unchanged.
-- The tool never calls Gmail's permanent-delete API.
-- Gmail-native `SPAM` is outside the mirror. Matching, reconciliation, and
-  deletion handling ignore it.
-- The next reconcile reverts Gmail-side label changes.
-- The tool inserts a mapped message again if it vanishes from Gmail.
+Mailbox membership and supported keywords map to Gmail labels. Reconciliation
+repairs managed labels and preserves unrelated user labels. It never removes
+native `SENT` or `DRAFT`. If a mapped Gmail message disappears, the tool tries
+adoption before inserting another copy.
 
-`role_labels` is the sole override for mailbox role labels. Missing `trash`
-and `junk` overrides use `Fastmail_Trash` and `Fastmail_Spam`. Archive has no
-special default override. The config decoder rejects the removed `trash_label`
-and `spam_label` fields before startup writes; there is no automatic migration.
+With `delete: true`, every non-spam Gmail message absent from the Fastmail
+source view moves to Trash. This includes unrelated and unmarked Gmail mail.
+With `delete: false`, extras stay unchanged. The tool never calls Gmail's
+permanent-delete API.
+
+Native `SPAM` stays outside matching, reconciliation, and deletion handling.
+Trash remains in the mirror: a matching copy returns from Trash while its
+source is in view. Extras already in Trash need no further move.
+
+### Role labels
+
+`role_labels` is the sole override for mailbox roles. Without overrides,
+`trash` and `junk` use the ordinary labels `Fastmail_Trash` and `Fastmail_Spam`.
+Archive has no special default override. The config decoder rejects the removed
+`trash_label` and `spam_label` fields before startup writes; it does not migrate
+them.
+
+The example config supplies ordinary labels for seven roles: `sent`, `drafts`,
+`archive`, `trash`, `junk`, `scheduled`, and `snoozed`. These examples change no
+defaults. Overrides affect role mailboxes, not ordinary folders without a role.
+Extension roles apply only if Fastmail advertises them. Scheduled and Snoozed
+labels transfer no timing behavior.
+
+Gmail forbids manual additions and removals of native `SENT` and `DRAFT`.
+Configure ordinary role overrides to avoid requesting those additions. Existing
+native labels remain alongside the ordinary labels; the engine does not upload
+mail again to replace them. Gmail reserves names beyond its published list.
+See [Google's label reference](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.labels).
 
 ## Folder selection
 
 `fastmail.include_mailboxes` defines the source view in every sync mode.
-Selectors use case-sensitive full Fastmail paths before Gmail role mapping.
-Exact paths select only that folder. A trailing `/*` selects all descendants
-at any depth, excluding the parent. Include the parent with a separate exact
-path. Matching respects slash boundaries: `Inbox/Example/*` does not select
-`Inbox/Examples/Child`. No other `*` position is valid.
+Selectors use case-sensitive full Fastmail paths before role mapping:
 
-An omitted or empty list includes all mail. Each selector must match at least
-one folder. Unknown or ambiguous paths, unsupported patterns, and empty matches
-fail before persistent writes. Overlapping selectors resolve to one canonical
-set of mailbox IDs.
+- An exact path selects that folder alone.
+- A trailing `/*` selects descendants at every depth, excluding the parent.
+  Add a separate exact path to include the parent.
+- Slash boundaries matter: `Inbox/Example/*` excludes `Inbox/Examples/Child`.
+- Other `*` positions are invalid. Every selector must match. Unknown or
+  ambiguous paths and empty matches fail before persistent writes.
 
-Fastmail queries the union of selected mailbox IDs on the server. A message
-in several selected folders appears once. Only selected mailbox memberships
-contribute Gmail labels; other Gmail labels on included messages stay
-unchanged. The selection reduces inventory, metadata loads, and Message-ID
-matching work. It does not reduce the initial Gmail inventory: the tool must
-read all Gmail metadata to find matches and extras. The cache stores a canonical
-selection fingerprint. A changed
-selection forces a fresh inventory; reordering or repeating the same paths
-does not.
+An omitted or empty list selects all mail. Overlapping selectors resolve to
+one canonical set of mailbox IDs. Fastmail queries their union on the server,
+so a message in several selected folders appears once. Only selected
+memberships contribute mailbox labels. Reconciliation preserves unrelated
+Gmail user labels on included messages.
 
-Every non-spam Gmail message absent from this view is an extra, regardless of
-its marker or history. With `delete: true`, extras move to Trash; with `false`,
-they stay. Source deletion, a move out of all selected folders, and config
-narrowing can all create extras. Moving within the view updates labels. The
-same rules apply to cached, incremental, full, cacheless, and dry runs.
+Selection reduces Fastmail inventory, metadata, and Message-ID matching work.
+It does not reduce the full Gmail inventory, which reads all Gmail metadata
+to find matches and extras. A changed canonical selection forces a fresh
+inventory; reordering or repeating paths does not. Selection does not change
+account identity or message identity headers.
 
-Selection does not change account identity or marker headers. Recovery uses
-the account marker and headers to restore known mappings. A local Message-ID
-index identifies adoption candidates among other Gmail mail. Native `SPAM`
-always stays excluded; Gmail Trash does not. A matching copy returns from Trash
-when its source is in the view. Extras already in Trash need no further move.
+A source deletion, a move outside all selected folders, or config narrowing
+can create extras. With deletion enabled, these rules can move any non-spam
+Gmail mail outside the view to Trash. Moving within the view updates labels.
+Cached, incremental, full, cacheless, and dry runs use the same source view.
 
-## Cache
+## Identity and adoption
 
-The optional JSON state is an API-call cache. Message sync remains correct
-without it. The cache stores:
+One JMAP Email maps to one Gmail message. Its Email ID survives mailbox moves.
+Each new insert carries one `X-Jmap2gmail-Account` header and one
+`X-Jmap2gmail-Email-ID` header. The insert path strips source-supplied copies
+before adding them.
 
-- authenticated account identities
-- JMAP and Gmail History cursors
-- JMAP Email ID to Gmail ID mappings and source-deletion marks
-- Fastmail mailbox to Gmail label ID and name mappings
-- canonical mailbox selection
+The account value is the hexadecimal SHA-256 hash of
+`Session.Username + "|" + accountID`. The account marker is
+`jmap2gmail-managed/<account-hash>`. Normal reconciliation preserves this label.
+Headers and marker recover mappings; they do not limit which extras move to
+Trash.
 
-It stores no message body or credential. Cached apply runs use
-`<state_file>.lock`. State writes use a temporary file and an atomic rename.
+The tool uses a source RFC Message-ID when available. Otherwise it inserts
+`jmap2gmail.<digest>@invalid`, where the digest is the hexadecimal encoding of
+the first 16 bytes of SHA-256 of the JMAP Email ID.
 
-A missing, corrupt, invalid, unsupported, or incomplete state file triggers a
-full server rebuild. The rebuild preflight reads a complete snapshot of the
-source view and all Gmail metadata before changing Gmail. It validates identity
-claims, inventory completeness, and adoption matches before Gmail mutations.
+Initial adoption matches one source message to one Gmail message by Message-ID.
+It adds the marker but cannot add identity headers to existing Gmail mail.
+After cache loss, recovery of adopted mail depends on a unique usable
+Message-ID. Missing or ambiguous identities can stop recovery. Identity headers
+on inserted mail provide stronger recovery; there is no blanket guarantee
+against duplicates after cache loss.
 
-Before changing Gmail, the tool marks the cached apply run as incomplete. If
-the final state save fails, the next run must rebuild from the servers.
+Before a rebuild changes Gmail, preflight rejects invalid or conflicting
+identity headers, unidentifiable marked legacy mail, duplicate Gmail claims,
+and ambiguous adoption matches. Errors identify repairs rather than guessing.
+A local Message-ID index avoids per-message Gmail searches during this scan.
 
-`--no-cache` uses in-memory state and always rebuilds. It creates no cache,
-state lock, or state temporary file. Use an external lock such as `flock` to
-prevent overlapping cacheless runs.
+## Cache and resume journal
 
-The mailbox mapping also tracks label renames. Without it, the tool cannot
-prove that an old Gmail label came from a renamed Fastmail mailbox. It creates
-the new label and keeps the old one to protect labels the user created.
+The optional JSON state caches API results. It stores no message body or
+credential. Its contents include:
+
+- Authenticated account identities and committed JMAP and Gmail History cursors.
+- JMAP Email ID to Gmail ID mappings and source-deletion marks.
+- Mailbox to Gmail label ID and name mappings, plus canonical source selection.
+- Source metadata, the label-policy fingerprint, and pending resume work.
+
+The state format remains version 1. The resume journal is an additive field
+with its own version 1. Valid checkpoints resume full or incremental work.
+Incomplete legacy state without a valid checkpoint requires a rebuild.
+
+Missing, corrupt, invalid, or unsupported state generally triggers a rebuild.
+Unresolved insert intent has stricter rules. An unsupported state version with
+intent returns an error. An invalid journal with valid intent identity retains
+the minimal trusted intent and both account bindings for recovery. Invalid
+intent identity returns an error and requires repair.
+
+Cached apply runs use `<state_file>.lock`. State saves create a `0600` temporary
+file, sync its contents, rename it atomically, then sync the directory and its
+ancestors. A failed checkpoint stops work. The error path does not overwrite
+a failed checkpoint with a best-effort save.
+
+### Checkpoint boundaries
+
+A full plan first completes preflight: the Fastmail ID inventory and metadata,
+the full Gmail metadata inventory, and identity and adoption validation. Only
+then does it create and save the replacement resume journal and source cache.
+
+After planning, repeatable work checkpoints every 100 items and at phase
+boundaries. Controlled errors, including cancellation, attempt to save progress
+when a journal exists and no checkpoint has failed. Ctrl-C and SIGTERM cancel
+the run. A crash or SIGKILL can replay up to 100 repeatable items since the last
+successful checkpoint.
+
+An insert saves intent before the destination request. On confirmed success,
+it saves the Gmail ID and clears intent immediately, before reporting a source
+body-close error. An insert HTTP 400 returns `ErrMutationRejected`, clears
+intent, and leaves the item pending. Other ambiguous insert failures preserve
+intent.
+
+Unresolved intent requires a complete validated Gmail inventory. Exactly one
+message with the matching account and Email ID headers restores the mapping.
+Zero or multiple exact matches stop the run with repair guidance. The engine
+does not resend or trash mail while that outcome remains unresolved.
+
+Role-policy changes can reevaluate cached metadata without a full scan only
+when `SourceEmailsComplete` is true. Otherwise they require full preflight.
+Label renames and reuse preserve existing mappings without deleting and
+uploading mail again. Source selection changes, expired cursors, Gmail History
+gaps, and unknown live Gmail additions can also require a full rebuild.
+
+### Known limits
+
+Inventory scans have no durable partial checkpoint. Errors before full
+preflight completes restart Fastmail inventory and metadata scans, Gmail pages
+and metadata reads, and local matching on the next rebuild attempt. A legacy
+incomplete cache may contain cursors but no resume journal. It still rebuilds,
+so a Gmail metadata HTTP 400 `failedPrecondition` can cause repeated full scans.
+
+The initial full source pass reuses validated Gmail inventory metadata for
+mapped mail, adoption, and native Spam checks. The engine discards this lookup
+before catch-up, source-deletion handling, and extra cleanup. Those paths and
+ordinary incremental reads fetch fresh destination metadata. The lookup never
+enters the state file. Neither service provides an atomic view of both accounts
+during a run.
+
+Without the mailbox mapping, the tool cannot prove that an old Gmail label
+came from a renamed Fastmail folder. It uses the target label and retains the
+old one to protect user labels.
+
+`--no-cache` always rebuilds with in-memory state. It creates no state cache,
+state lock, or temporary state file. Use an external lock such as `flock` to
+prevent overlapping cacheless runs. Apply runs still persist OAuth renewals
+under the separate token lock.
 
 ## Run flow
 
-1. Load the cache, or prepare a full rebuild.
-2. Bind the authenticated Fastmail and Gmail identities.
-3. Resolve selected Fastmail paths and derive their Gmail labels.
-4. When a full scan is needed, inventory Gmail and validate identity and matches.
-5. Create or rename labels, then reconcile Fastmail mail.
-6. Move Gmail mail absent from the source view to Trash if deletion is enabled.
-7. Reconcile Gmail History changes and save new cursors.
+1. Load state and bind the authenticated Fastmail and Gmail identities.
+2. Resolve selected Fastmail paths and derive Gmail label names.
+3. Plan incremental work, or complete full preflight and save its resume plan.
+4. On resume, catch up source and Gmail History changes before replaying work.
+5. Create or rename labels, then reconcile in-scope source mail.
+6. Catch up source and Gmail History changes, then process remaining source
+   work, including destroyed and out-of-scope messages.
+7. Handle Gmail extras, then commit cursors and clear the journal.
 
-JMAP and Gmail History cursors make cached runs incremental. An absent or
-expired cursor causes a full scan. Full scans, selection changes, gaps in Gmail
-History, and unknown live Gmail additions require fresh source and destination
-inventories. A local Message-ID index replaces per-message Gmail searches.
+Absent or expired cursors require full scans. Catch-up failures that invalidate
+the view require fresh preflight before destructive cleanup. Checkpoints record
+pending work before committed cursors advance.
 
-State saves follow each successful mutation. Cursors advance after all earlier
-work succeeds. A message without an RFC Message-ID gets a deterministic
-`@invalid` value during insertion.
+### Inventory validation
 
-The initial full source pass reuses validated Gmail inventory metadata for
-existing mappings, adopted mail, and native Spam checks. This lookup exists
-only for that pass. The engine discards it before source-deletion handling,
-extra-message cleanup, and incremental catch-up. Those paths and ordinary
-incremental reads use fresh destination metadata. This adds no persistent
-state or cache format changes. Accounts can change during a run; the inventory
-does not provide an atomic view of both accounts.
-
-## Rebuild progress
-
-With `--verbose`, rebuilds print phases on stderr before Fastmail inventory,
-metadata loading, Gmail metadata inventory, and local Message-ID matching.
-Fastmail metadata progress reports completed and total messages after each
-batch. Local matching reports
-completed counts and elapsed time after the first item, each 100 items, and the
-final item. It also reports after an item if five seconds have passed since the
-last update. Empty scans report zero completed work.
-
-With `--verbose`, full source reconciliation reports completed and total
-messages, unchanged messages within the pass, and elapsed time. It starts at
-zero, then reports after the first successful message, every 100 messages, and
-completion. It also
-reports after a successful message when five seconds have passed since the
-last update. Unchanged messages count as completed work. Failed messages do
-not advance the count.
-
-Reports run between operations, so pending requests can delay output. No
-background timer prints progress. Rebuild validation still precedes Gmail
-changes.
-
-The authenticated Gmail HTTP client has a 60-second timeout per HTTP attempt in
-normal and dry runs. Quota backoff waits fall outside that timeout.
-This limit does not cover the initial OAuth token check, which runs before the
-client is created. Apply-run token refresh keeps its separate 30-second limit.
+Every JMAP query page must include a total, the expected position, and a stable
+query state and total. Query-state changes restart pagination, up to five
+attempts. Empty or duplicate IDs, inconsistent totals, early endings, and
+missing or duplicate source metadata stop the scan. Gmail inventory rejects
+invalid or duplicate IDs, invalid metadata, and repeated page tokens. A Gmail
+metadata 404 skips a message that vanished during the scan. Gmail History also
+rejects repeated page tokens and malformed records.
 
 ## Gmail request policy
 
-Gmail requests proceed without proactive pacing. The same policy applies to
-reads, writes, and dry runs.
+Every Gmail software development kit (SDK) request attempt has a 60-second
+child context deadline, including response decoding. The production OAuth
+HTTP client has `Timeout: 0`. Backoff waits use the parent context, outside the
+attempt deadline. There is no aggregate retry cap or proactive pacing.
 
-Explicit minute quota errors retry until success or context cancellation.
-Exponential backoff starts at one second with jitter and caps its delay at
-64 seconds, unless the server requests a later retry. With `--verbose`, retry
-waits report to stderr. The policy does not promise retries for every transient
-or server error. In particular, an
-ambiguous insert failure returns to the engine for next-run identity recovery.
+Explicit minute quota limits retry until success or parent cancellation.
+Backoff starts at one second with jitter and caps at 64 seconds, unless the
+server requests a longer wait. Daily quota and authentication failures do not
+qualify for these retries.
 
-After actual quota retries succeed, verbose diagnostics report recovery with
-the API method, retry count, and elapsed time, without message IDs. Requests
-that fail, are canceled, or never encounter a quota limit emit no recovery
-notice. Default output remains the single summary line and any errors.
+Timeouts retry only for five reads: `labels.list`, `getProfile`, `messages.get`,
+`messages.list`, and `history.list`. They use the same backoff until success or
+parent cancellation. An expired parent deadline stops retries. Write timeouts
+return errors because the mutation may have succeeded.
 
-Insertion streams MIME into a temporary `0600` file and replays it for quota
-retries. Each return path removes the spool, including cancellation and
-failure. The spool is separate from the state cache and exists only during an
-insert. Dry runs never create it.
+Generic HTTP 400 errors, including `failedPrecondition`, HTTP 5xx errors, and
+end-of-file (EOF) failures without an expired attempt deadline receive no
+automatic retry. A confirmed SDK success
+with a nil error remains successful even if cancellation races with completion.
+A conclusive HTTP error retains its cause alongside parent cancellation. Only
+an insert HTTP 400 clears insert intent through `ErrMutationRejected`.
 
-## Dry run
+Insertion spools Multipurpose Internet Mail Extensions (MIME) data into a
+`0600` temporary file for quota retries. Deferred cleanup closes and removes
+the file on normal returns, errors, and cancellation. A crash or hard kill can
+leave the spool behind. The spool is separate from state; dry runs never create
+it.
+
+## Output and dry runs
 
 `sync` applies Gmail changes and cache writes by default. `--dry-run` previews
-without persistent writes. Successful apply and dry runs print one summary line
-on stdout; dry runs use the prefix `DRY RUN summary:`. `-verbose` or `--verbose`
-enables config and folder diagnostics, per-message actions, rebuild progress,
-and quota retry waits on stderr. Verbose dry runs list each planned label create
-or rename, insert, adoption, label change, Trash move, and native-spam ignore.
-Errors, including timeout failures, always print on stderr and return a
-nonzero exit status, regardless of verbosity.
+changes without persistent writes. Successful runs print one summary line on
+stdout. Dry runs prefix it with `DRY RUN summary:`. Errors always print on
+stderr and return a nonzero exit status.
 
-A dry run mutates no Gmail or Fastmail data. It also writes no cache, state
-lock, temporary state, or OAuth token. It may read an existing cache and needs
-existing credential files.
+`-verbose` or `--verbose` sends config and folder diagnostics, per-message
+actions, progress, retry waits, and retry recovery notices to stderr. Dry runs
+list planned label creation or renaming, inserts, adoption, label changes,
+Trash moves, and native-spam ignores. Recovery notices include the API method,
+retry counts, and elapsed time, without message IDs.
+
+Rebuild progress names Fastmail inventory, metadata loading, Gmail metadata
+inventory, and local Message-ID matching. Metadata counts update after each
+batch. Matching counts update after the first item, every 100 items, completion,
+or an item that crosses five seconds since the last report. Empty scans report
+zero. Full source reconciliation starts at zero and follows the same count and
+time thresholds after successful messages. Unchanged messages count as complete;
+failed messages do not.
+
+Reports run between operations, with no background timer. Pending requests and
+retry waits can delay the next progress report.
+
+A dry run writes no Gmail or Fastmail data, cache, state lock, temporary state,
+OAuth token, or token lock. It may read an existing cache and requires existing
+credential files. Deep cloning includes nested metadata and resume collections,
+so planning cannot alter the loaded journal. With `--no-cache`, the journal
+stays in memory.
 
 ## OAuth renewal
 
-Sync validates or renews the Google token before starting reconciliation.
-Apply runs hold `<gmail.token_file>.lock` while loading, renewing, and saving
-tokens. Each save uses an atomic replacement. The tool saves each renewed token
-before the HTTP transport uses it, including during long syncs. If Google omits
-a refresh token, the tool keeps the existing value. It checks for changes in
-the access token, refresh token, token type, and expiry. Token files use `0600`
-permissions.
+Sync checks the Google token before reconciliation. This initial check falls
+outside Gmail SDK attempt deadlines. Apply runs hold `<gmail.token_file>.lock`
+while loading, refreshing, and saving tokens. Lock waits stop on cancellation
+or after five seconds. This lock also protects `google-auth` token writes;
+it does not prevent overlapping syncs.
 
-The lock is independent of the optional state cache and also protects token
-writes from `google-auth`. Lock waits stop on cancellation or after five
-seconds. Renewal requests time out after 30 seconds. This lock does not prevent
-overlapping Gmail syncs.
+Persistent apply-run refresh requests have an explicit 30-second deadline.
+Each renewed token reaches disk before the HTTP transport uses it, including
+during long syncs. If Google omits a refresh token, the tool retains the old
+value. Change detection covers access token, refresh token, token type, and
+expiry. Saves use `0600` temporary files, file sync, and atomic rename. Token
+saves do not sync directories as state saves do.
 
-Dry runs use an in-memory OAuth token source with no credential or lock writes.
-An invalid refresh grant requires explicit `google-auth` reauthorization.
+Dry runs use `config.TokenSource` in memory, without the persistent refresh
+path's explicit 30-second deadline or credential writes. An invalid refresh
+grant requires explicit `google-auth` reauthorization.
 
 ## Permissions and libraries
 
 The tool requests only `gmail.modify`. It uses this scope to read metadata and
 history, insert messages, manage labels, and move mail to Trash. The scope also
-permits sending mail; jmapsync does not send mail. It does not allow permanent
-deletion that bypasses Trash. See
-[Google's scope documentation](https://developers.google.com/workspace/gmail/api/auth/scopes).
+permits sending mail, but excludes permanent deletion that bypasses Trash.
+See [Google's scope documentation](https://developers.google.com/workspace/gmail/api/auth/scopes).
 
 - `git.sr.ht/~rockorager/go-jmap` handles JMAP and blob downloads.
 - `google.golang.org/api/gmail/v1` handles Gmail.

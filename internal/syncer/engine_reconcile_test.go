@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"jmapsync/internal/store"
+	"jmap2gmail/internal/store"
 )
 
 type reuseDestination struct {
