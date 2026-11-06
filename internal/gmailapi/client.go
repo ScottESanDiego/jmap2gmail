@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -153,7 +154,7 @@ func (c *Client) metadataMessage(ctx context.Context, id string) (syncer.Message
 		return c.service.Users.Messages.Get(c.user, id).
 			Format("metadata").
 			MetadataHeaders(syncer.HeaderAccount, syncer.HeaderEmailID, "Message-ID").
-			Fields("id,labelIds,payload(headers)").
+			Fields("id,threadId,labelIds,payload(headers)").
 			Context(attemptCtx).Do()
 	})
 	if isHTTPStatus(err, http.StatusNotFound) {
@@ -166,7 +167,29 @@ func (c *Client) metadataMessage(ctx context.Context, id string) (syncer.Message
 		return syncer.Message{}, fmt.Errorf("Gmail metadata response does not match requested message %q", id)
 	}
 	if message.Payload == nil {
-		return syncer.Message{}, fmt.Errorf("Gmail metadata response for %q is missing payload", id)
+		threadID := message.ThreadId
+		// A filtered metadata response can omit payload. Retry once without the
+		// header filter, while keeping the read in metadata format.
+		message, err = execute(ctx, c, "messages.get", func(attemptCtx context.Context) (*gmail.Message, error) {
+			return c.service.Users.Messages.Get(c.user, id).
+				Format("metadata").Fields("id,threadId,labelIds,payload").
+				Context(attemptCtx).Do()
+		})
+		if isHTTPStatus(err, http.StatusNotFound) {
+			return syncer.Message{}, fmt.Errorf("%w: Gmail message %q", syncer.ErrNotFound, id)
+		}
+		if err != nil {
+			return syncer.Message{}, fmt.Errorf("get Gmail message %q fallback metadata: %w", id, err)
+		}
+		if message == nil || message.Id != id || strings.TrimSpace(message.Id) == "" {
+			return syncer.Message{}, fmt.Errorf("Gmail fallback metadata response does not match requested message %q", id)
+		}
+		if message.Payload == nil {
+			if message.ThreadId != "" {
+				threadID = message.ThreadId
+			}
+			return syncer.Message{}, missingMetadataPayloadError(id, threadID, c.user)
+		}
 	}
 	result := syncer.Message{ID: message.Id, LabelIDs: append([]string(nil), message.LabelIds...)}
 	for _, header := range message.Payload.Headers {
@@ -183,6 +206,21 @@ func (c *Client) metadataMessage(ctx context.Context, id string) (syncer.Message
 		}
 	}
 	return result, nil
+}
+
+func missingMetadataPayloadError(id, threadID, user string) error {
+	identity := fmt.Sprintf("Gmail API message id=%q, userId=%q", id, user)
+	if user == "me" {
+		identity += " (me means the authenticated account)"
+	}
+	if threadID != "" {
+		identity += fmt.Sprintf(", threadId=%q", threadID)
+	}
+	guidance := "Retry once in case this is transient; check the correct authorized account in your browser and inspect the conversation with More (three dots) > Show original."
+	if threadID != "" {
+		guidance += fmt.Sprintf("\nBest-effort conversation link: https://mail.google.com/mail/u/0/#all/%s (select the correct account; Gmail API IDs are not guaranteed to map to browser URLs).", url.PathEscape(threadID))
+	}
+	return fmt.Errorf("Gmail metadata response is missing payload after one fallback for %s; cannot use incomplete identity metadata.\n%s\nFor an exact API lookup, open https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/get and use Try it with userId=%q, id=%q, format=metadata.", identity, guidance, user, id)
 }
 
 func (c *Client) Message(ctx context.Context, id string) (syncer.Message, error) {

@@ -204,6 +204,18 @@ invalid or duplicate IDs, invalid metadata, and repeated page tokens. A Gmail
 metadata 404 skips a message that vanished during the scan. Gmail History also
 rejects repeated page tokens and malformed records.
 
+Gmail metadata reads first request only `X-Jmap2gmail-Account`,
+`X-Jmap2gmail-Email-ID`, and `Message-ID` headers. A matching response ID with a
+missing or null payload triggers one fallback `metadata` request without the
+header filter, selecting `id,threadId,labelIds,payload`. A present empty payload
+is valid. The fallback uses the same identity and duplicate-header validation;
+it never requests `full` or `raw` format or message bodies. A fallback 404 keeps
+the vanished-message behavior. Invalid response IDs stop the read. If the
+payload remains absent, an error identifies the Gmail API message ID, authorized
+account, and available thread ID, with inspection guidance. The tool does not
+invent identity headers, skip the message, or change it to repair the response.
+Full preflight must finish this validation before Gmail changes begin.
+
 ## Gmail request policy
 
 Every Gmail software development kit (SDK) request attempt has a 60-second

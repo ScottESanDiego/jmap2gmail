@@ -221,6 +221,27 @@ line. Each Gmail request attempt has a 60-second context deadline, covering
 response headers and body decoding in normal and dry runs. Retry waits fall
 outside this deadline, so an operation can take longer.
 
+### Missing Gmail metadata payload
+
+If Gmail omits the payload from a filtered metadata reply, the tool makes one
+fallback metadata request without the header filter. This replaces the earlier
+immediate stop. Neither request reads message bodies or uses `full` or `raw`
+format. An empty payload object is valid and needs no fallback. If the fallback
+still omits the payload, the run stops with an error, even without `--verbose`.
+During full preflight, this stops the run before Gmail changes begin.
+
+Follow the error's Gmail API message ID and authorized account, rather than
+assuming the ID identifies a Fastmail message. Retry once in case Gmail's
+response was transient. Then open Gmail in the authorized account and inspect
+the conversation with **More** (three dots) → **Show original**. When available, the error includes a
+best-effort conversation link. Its `/u/0/` account may differ from yours, and
+Gmail API IDs do not always map to browser URLs. If the link fails, open the
+[Gmail API `users.messages.get` explorer](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/get)
+and choose **Try it** with the correct account. Set `userId` to the value in the
+error (`me` means the authenticated account), `id` to the exact Gmail API message
+ID, and `format` to `metadata`. The tool does not skip or repair the message;
+moving it to Trash does not remove it from the inventory.
+
 ## Gmail retries
 
 Gmail requests proceed without proactive pacing, including during dry runs.
