@@ -101,6 +101,24 @@ identity headers, unidentifiable marked legacy mail, duplicate Gmail claims,
 and ambiguous adoption matches. Errors identify repairs rather than guessing.
 A local Message-ID index avoids per-message Gmail searches during this scan.
 
+Fatal identity and adoption errors request human-readable metadata through
+optional diagnostic interfaces. One child context gives all diagnostic reads
+a shared 10-second deadline and respects caller cancellation. Reports show
+at most 20 sorted candidates per side, plus full counts and truncation.
+Lookup failures preserve the primary conflict and mark details unavailable.
+Subjects use RFC 2047 decoding; terminal fields use safe quoting. Reports
+include sender and recipient fields, sent and received dates with timezones,
+full Fastmail folder paths, and Gmail label names. Message-ID queries help
+locate mail; API IDs and any thread links serve as secondary references.
+
+Diagnostic reads run only after a fatal conflict. Normal inventory, successful
+syncs, and verbose bulk progress do not fetch or log diagnostic message fields.
+The journal does not persist them. Diagnostic API requests fetch metadata only;
+reports contain no credentials, message bodies, raw mail, or snippets. Normal
+OAuth authentication still applies. Diagnostics do not choose a candidate or
+resolve conflicts. A shared Message-ID identifies candidates; it does not
+prove that their contents match or that a copy is unwanted.
+
 ## Cache and resume journal
 
 The optional JSON state caches API results. It stores no message body or

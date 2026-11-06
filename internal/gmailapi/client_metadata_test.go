@@ -287,7 +287,11 @@ func TestMetadataFallbackFailurePreventsFullPreflightMutations(t *testing.T) {
 			if payload == "null" {
 				want = "missing payload after one fallback"
 			}
-			if err == nil || !strings.Contains(err.Error(), want) || gets != 2 || mutations != 0 || state.saves != 0 {
+			wantGets := 3 // Identity failures fetch one extra, metadata-only diagnostic.
+			if payload == "null" {
+				wantGets = 2
+			}
+			if err == nil || !strings.Contains(err.Error(), want) || gets != wantGets || mutations != 0 || state.saves != 0 {
 				t.Fatalf("gets=%d mutations=%d saves=%d error=%v", gets, mutations, state.saves, err)
 			}
 		})

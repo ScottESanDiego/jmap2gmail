@@ -51,6 +51,7 @@ type Engine struct {
 	Store       StateStore
 	Options     Options
 
+	sourceMailboxes    []Mailbox
 	selectedMailboxes  map[string]bool
 	scopeChanged       bool
 	desiredScope       string
@@ -123,6 +124,7 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	e.sourceMailboxes = slices.Clone(mailboxes)
 	previousScope := e.state.MailboxScope
 	if err := e.prepareMailboxScope(mailboxes); err != nil {
 		return Result{}, err
@@ -265,11 +267,11 @@ func (e *Engine) preflightRebuild(ctx context.Context) error {
 		hasEmailID := message.EmailIDHeaders != nil
 		if !hasAccount && !hasEmailID {
 			if len(message.MessageIDHeaders) != 1 {
-				return fmt.Errorf("legacy Gmail message %q cannot be identified; restore the cache or remove its marker label", message.ID)
+				return e.conflictError(ctx, fmt.Errorf("legacy Gmail message %q cannot be identified", message.ID), firstMessageID(message.MessageIDHeaders), nil, []Message{message})
 			}
 			messageID := strings.Trim(strings.TrimSpace(message.MessageIDHeaders[0]), "<>")
 			if messageID == "" {
-				return fmt.Errorf("legacy Gmail message %q cannot be identified; restore the cache or remove its marker label", message.ID)
+				return e.conflictError(ctx, fmt.Errorf("legacy Gmail message %q cannot be identified", message.ID), firstMessageID(message.MessageIDHeaders), nil, []Message{message})
 			}
 			legacy[messageID] = append(legacy[messageID], message)
 			continue
@@ -277,14 +279,14 @@ func (e *Engine) preflightRebuild(ctx context.Context) error {
 		if len(message.AccountHeaders) != 1 || len(message.EmailIDHeaders) != 1 ||
 			strings.TrimSpace(message.AccountHeaders[0]) != e.accountHash ||
 			strings.TrimSpace(message.EmailIDHeaders[0]) == "" {
-			return fmt.Errorf("managed Gmail message %q has invalid identity headers; remove its marker label or repair the headers", message.ID)
+			return e.conflictError(ctx, fmt.Errorf("managed Gmail message %q has invalid identity headers", message.ID), firstMessageID(message.MessageIDHeaders), nil, []Message{message})
 		}
 		sourceID := strings.TrimSpace(message.EmailIDHeaders[0])
 		if prior := e.state.Messages[sourceID].GmailID; prior != "" && prior != message.ID && nonSpamInventory[prior] {
-			return fmt.Errorf("Fastmail email %q has duplicate Gmail claims; remove the extra marker label", sourceID)
+			return e.conflictError(ctx, fmt.Errorf("Fastmail email %q has duplicate Gmail claims", sourceID), firstMessageID(message.MessageIDHeaders), []string{sourceID}, []Message{message, {ID: prior}})
 		}
 		if priorSource := claimedGmail[message.ID]; priorSource != "" && priorSource != sourceID {
-			return fmt.Errorf("Gmail identity claims conflict; remove the incorrect marker label")
+			return e.conflictError(ctx, errors.New("Gmail identity claims conflict"), firstMessageID(message.MessageIDHeaders), []string{sourceID, priorSource}, []Message{message})
 		}
 		e.state.Messages[sourceID] = store.Message{GmailID: message.ID}
 		claimedGmail[message.ID] = sourceID
@@ -302,11 +304,11 @@ func (e *Engine) preflightRebuild(ctx context.Context) error {
 		candidates := legacy[messageID]
 		sourceIDs := sourcesByMessageID[messageID]
 		if len(candidates) > 1 || len(sourceIDs) > 1 {
-			return fmt.Errorf("legacy Gmail mapping is ambiguous; restore the cache or remove extra marker labels")
+			return e.conflictError(ctx, errors.New("legacy Gmail mapping is ambiguous"), messageID, sourceIDs, candidates)
 		}
 		if len(candidates) == 1 && len(sourceIDs) == 1 {
 			if prior := claimedGmail[candidates[0].ID]; prior != "" && prior != sourceIDs[0] {
-				return fmt.Errorf("legacy Gmail mapping conflicts with identity headers; repair the marker labels")
+				return e.conflictError(ctx, errors.New("legacy Gmail mapping conflicts with identity headers"), messageID, sourceIDs, candidates)
 			}
 			e.state.Messages[sourceIDs[0]] = store.Message{GmailID: candidates[0].ID}
 			claimedGmail[candidates[0].ID] = sourceIDs[0]
@@ -345,14 +347,14 @@ func (e *Engine) preflightAdoptions(ctx context.Context, claimedGmail map[string
 		sourceIDs := byMessageID[messageID]
 		slices.Sort(sourceIDs)
 		if len(candidates) > 1 || (len(candidates) == 1 && len(sourceIDs) > 1) {
-			return fmt.Errorf("Gmail Message-ID adoption is ambiguous; remove duplicate messages or add identity headers")
+			return e.conflictError(ctx, errors.New("Gmail Message-ID adoption is ambiguous"), messageID, sourceIDs, candidates)
 		}
 		for _, sourceID := range sourceIDs {
 			e.adoptionScan[sourceID] = candidates
 		}
 		if len(candidates) == 1 {
 			if prior := claimedGmail[candidates[0].ID]; prior != "" && prior != sourceIDs[0] {
-				return fmt.Errorf("Gmail Message-ID adoption conflicts with identity headers; repair the marker labels")
+				return e.conflictError(ctx, errors.New("Gmail Message-ID adoption conflicts with identity headers"), messageID, sourceIDs, candidates)
 			}
 			e.state.Messages[sourceIDs[0]] = store.Message{GmailID: candidates[0].ID}
 			e.adoptions[sourceIDs[0]] = true
@@ -594,6 +596,9 @@ func (e *Engine) syncEmail(ctx context.Context, sourceEmail Email) error {
 			}
 			candidates = e.withoutSpamCandidates(candidates)
 			candidates = e.withoutIdentityCandidates(candidates)
+		}
+		if len(candidates) > 1 {
+			return e.conflictError(ctx, errors.New("Gmail Message-ID adoption is ambiguous"), messageID, []string{sourceEmail.ID}, candidates)
 		}
 		if len(candidates) == 1 && !e.gmailIDMappedElsewhere(sourceEmail.ID, candidates[0].ID) {
 			e.result.Adopted++

@@ -45,6 +45,39 @@ before it changes Gmail. It stops if a marked legacy message lacks a usable Mess
 source Message-IDs, duplicate Gmail matches, and conflicting identities also
 stop the run with repair guidance.
 
+## Resolve identity conflicts
+
+A fatal identity conflict includes a read-only comparison of the matching
+Fastmail and Gmail candidates. It shows subjects, senders, recipients, sent
+and received dates with timezones, full Fastmail folder paths, and Gmail label
+names. Counts distinguish multiple source messages from multiple Gmail matches;
+matching candidates do not prove identical contents or unwanted copies. Each
+side shows at most 20 sorted entries, with the total count and any truncation.
+The extra message fields appear only on fatal conflicts. Normal inventories,
+successful runs, and verbose progress do not fetch or log these fields, and the
+resume journal does not save them. Treat conflict output as private mail
+metadata. A failed or timed-out lookup leaves the original conflict visible
+with details unavailable.
+
+Compare both sides before repairing a conflict. Use the supplied Message-ID
+queries: Gmail supports `in:anywhere -in:spam rfc822msgid:<ID>`
+([Gmail search operators](https://support.google.com/mail/answer/7190)). Fastmail
+supports `msgid:<ID> in:*`, including Trash and Spam
+([Fastmail search](https://www.fastmail.help/hc/en-us/articles/360060591213-Searching-your-mail)).
+Gmail conversation results can contain other messages, so inspect each match.
+The report counts eligible matching candidates, not every search result.
+Malformed Message-IDs have no search query. API IDs are secondary references
+and may not appear in either web interface. Restore a valid matching cache when
+appropriate. Repair incorrect marker labels only after confirming ownership;
+Gmail cannot edit existing message headers. Multiple valid Fastmail copies with
+one Message-ID require source repair or reimport with unique Message-IDs where
+appropriate; otherwise the conflict remains. Remove a Gmail copy only after
+confirming it is unwanted and backing it up. Trash still counts; permanent
+removal is irreversible. The tool never deletes, relabels, skips, or reinserts
+mail to resolve a conflict. Full rebuilds check conflicts before Gmail writes.
+Multiple eligible Gmail matches also stop incremental adoption; that run may
+already have completed other work.
+
 ## Setup
 
 Requires Go 1.27.2 or newer.
